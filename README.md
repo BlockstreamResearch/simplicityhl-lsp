@@ -2,22 +2,101 @@
 
 This project was originally part of [SimplicityHL](https://github.com/BlockstreamResearch/SimplicityHL), the high-level language for writing Simplicity smart contracts.
 
-## Overview
+Language Server for [SimplicityHL language](https://simplicity-lang.org/).
 
-This repository contains:
+## Features
 
-- [lsp/](lsp/) — A Language Server Protocol implementation for SimplicityHL, providing diagnostics, completions, hover, and go-to-definition support.
-- [vscode/](vscode/) — A VSCode extension that provides syntax highlighting and integrates with the LSP.
+- Basic diagnostic for SimplicityHL code
 
-## What is SimplicityHL?
+![diagnostics](assets/diagnostics.gif)
 
-[Simplicity](https://github.com/BlockstreamResearch/simplicity) is a typed, combinator-based, functional language without loops or recursion, developed as an alternative to Bitcoin Script that is formally specified and can be statically analyzed.
+- Completions of built-ins, jets and functions
 
-SimplicityHL is a high-level language for writing Simplicity smart contracts. It looks and feels like [Rust](https://www.rust-lang.org), but compiles to Simplicity bytecode. Developers write SimplicityHL transactions, which Bitcoin/Liquid nodes verify with the Simplicity script interpreter.
+![completion](assets/completion.gif)
 
-## Getting Started
+- Hover for built-ins, jets and functions, with support of documentation
 
-See the individual READMEs for setup and usage:
+![hover](assets/hover.gif)
 
-- [LSP README](lsp/README.md)
-- [VSCode Extension README](vscode/README.md)
+- Go to definition for functions
+
+![goto-definition](assets/goto-definition.gif)
+
+## Installation
+
+Install Language Server using `cargo`:
+
+```bash
+cargo install simplicityhl-lsp
+```
+
+## Integration with editors
+
+### Neovim
+
+#### LSP
+
+0. Install `simplicityhl-lsp` to your `PATH`.
+
+1. Include this Lua snippet to your Neovim config:
+
+```lua
+vim.filetype.add({
+	extension = {
+		simf = "simf",
+	},
+})
+
+vim.lsp.config["simplicityhl-lsp"] = { cmd = { "simplicityhl-lsp" }, filetypes = { "simf" }, settings = {} }
+vim.lsp.enable("simplicityhl-lsp")
+```
+
+2. Open `.simf` file and check that LSP is active ("attached"):
+
+```vim
+:checkhealth vim.lsp
+```
+
+#### Tree-sitter (Highlighting)
+
+Currently, the Language Server does not provide any syntax highlighting on its own, but you can install tree-sitter for SimplicityHL:
+
+0. Set up the [`nvim-treesitter`](https://github.com/nvim-treesitter/nvim-treesitter/tree/main) plugin.
+
+1. Include this Lua snippet in your Neovim config to register parser:
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+	pattern = "TSUpdate",
+	callback = function()
+		require("nvim-treesitter.parsers").simplicityhl = {
+			install_info = {
+				url = "https://github.com/distributed-lab/tree-sitter-simplicityhl",
+				queries = "queries",
+			},
+			filetype = "simf",
+			tier = 0,
+		}
+	end,
+})
+
+vim.treesitter.language.register("simplicityhl", { "simf" })
+
+vim.api.nvim_create_autocmd("FileType", {
+	pattern = { "simf" },
+	callback = function()
+		vim.treesitter.start()
+	end,
+})
+```
+
+2. Restart Neovim and run:
+
+```vim
+:TSInstall simplicityhl
+```
+
+If everything is working correctly, you should see syntax highlighting in `.simf` files.
+
+**Note:** This method is compatible only with `nvim-treesitter` v0.10 or newer.
+

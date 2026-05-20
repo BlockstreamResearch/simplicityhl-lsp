@@ -70,7 +70,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF##*/}"
           VERSION_TAG="${TAG#simplicityhl-lsp-v}"
-          CRATE_VERSION=$(cargo metadata --manifest-path lsp/Cargo.toml --no-deps --format-version=1 | jq -r '.packages[] | select(.name=="simplicityhl-lsp").version')
+          CRATE_VERSION=$(cargo metadata --manifest-path ./Cargo.toml --no-deps --format-version=1 | jq -r '.packages[] | select(.name=="simplicityhl-lsp").version')
           echo "Tag version: $VERSION_TAG"
           echo "Crate version: $CRATE_VERSION"
           if [ "$VERSION_TAG" != "$CRATE_VERSION" ]; then
