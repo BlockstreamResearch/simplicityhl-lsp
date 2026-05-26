@@ -34,3 +34,7 @@ unused_mut = "warn"
 
 [lints.clippy]
 pedantic = "warn"
+
+[workspace.metadata.rbmt.toolchains]
+nightly = "nightly-2025-08-23"
+stable = "1.95.0"
