@@ -38,3 +38,13 @@ pedantic = "warn"
 [workspace.metadata.rbmt.toolchains]
 nightly = "nightly-2025-08-23"
 stable = "1.95.0"
+
+[package.metadata.rbmt.lint]
+allowed_duplicates = [
+    # version mismatch (1.* and 2.*) within the dependencies of tower-lsp-server
+    "bitflags",
+    # version mismatch (0.14.* and 0.15.*) between tower-lsp-server and chumsky
+    "hashbrown",
+    # versions match, but are split across different dependency trees
+    "memchr",
+]
