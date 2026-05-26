@@ -15,5 +15,4 @@ dist/
 *.vsix
 
 # lock files
-Cargo.lock
 **/pnpm-lock.yaml
