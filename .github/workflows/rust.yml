@@ -1,0 +1,65 @@
+on:   # yamllint disable-line rule:truthy
+  pull_request:
+  push:
+    branches:
+      - master
+      - 'test-ci/**'
+
+name: Continuous integration
+
+jobs:
+  Test:
+    name: Test - ${{ matrix.toolchain }} toolchain
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly, msrv]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Setup cargo-rbmt"
+        uses: ./.github/actions/setup-rbmt
+      - name: "Run tests"
+        run: cargo rbmt --lock-file existing test --toolchain ${{ matrix.toolchain }}
+
+  Windows:
+    name: Test - Windows stable toolchain
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Select toolchain"
+        uses: dtolnay/rust-toolchain@stable
+      - name: "Run tests"
+        run: cargo test
+
+  Check:
+    name: Check - ${{ matrix.task }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        task: [lint, docs, docsrs]
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Setup cargo-rbmt"
+        uses: ./.github/actions/setup-rbmt
+      - name: "Run ${{ matrix.task }}"
+        run: cargo rbmt --lock-file existing ${{ matrix.task }}
+
+  Format:
+    name: Format
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+      - name: "Checkout repo"
+        uses: actions/checkout@v4
+      - name: "Setup cargo-rbmt"
+        uses: ./.github/actions/setup-rbmt
+      - name: "Check formatting"
+        run: cargo rbmt fmt --check
