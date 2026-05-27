@@ -22,11 +22,9 @@ jobs:
           components: clippy, rustfmt
 
       - name: Rustfmt check
-        working-directory: lsp
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        working-directory: lsp
         run: cargo clippy --all-targets --all-features
 
   tests:
@@ -40,7 +38,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run tests
-        working-directory: lsp
         run: cargo test --all-features -- --nocapture
 
   publish:
@@ -79,7 +76,6 @@ jobs:
           fi
 
       - name: Check package
-        working-directory: lsp
         run: cargo package
 
       - name: Authenticate with crates.io
@@ -89,7 +85,6 @@ jobs:
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        working-directory: lsp
         run: cargo publish
 
 

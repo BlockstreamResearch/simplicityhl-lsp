@@ -2,7 +2,7 @@
 name = "simplicityhl-lsp"
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.79.0"
+rust-version = "1.85.0"
 description = "Language Server Protocol (LSP) server for SimplicityHL."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/BlockstreamResearch/SimplicityHL"
@@ -16,14 +16,13 @@ tokio = { version = "1.47.1", features = ["full"] }
 serde_json = "1.0.143"
 tower-lsp-server = "0.22.1"
 
-env_logger = "0.11.8"
+env_logger = { version = "0.11.8", default-features = false }
 thiserror = "2.0.17"
 
 ropey = "1.6.1"
 miniscript = "12.3.1"
 simplicityhl = "0.5.0"
 nom = "8.0.0"
-lazy_static = "1.5.0"
 
 [lints.rust]
 unsafe_code = "deny"
@@ -38,3 +37,13 @@ pedantic = "warn"
 [workspace.metadata.rbmt.toolchains]
 nightly = "nightly-2025-08-23"
 stable = "1.95.0"
+
+[package.metadata.rbmt.lint]
+allowed_duplicates = [
+    # version mismatch (1.* and 2.*) within the dependencies of tower-lsp-server
+    "bitflags",
+    # version mismatch (0.14.* and 0.15.*) between tower-lsp-server and chumsky
+    "hashbrown",
+    # versions match, but are split across different dependency trees
+    "memchr",
+]

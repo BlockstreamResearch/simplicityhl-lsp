@@ -1,9 +1,8 @@
-use lazy_static::lazy_static;
 use std::collections::HashMap;
 
 // Most basic type casts for integer types.
-lazy_static! {
-    pub(crate) static ref TYPE_CASTS: HashMap<&'static str, &'static str> = {
+pub(crate) static TYPE_CASTS: std::sync::LazyLock<HashMap<&'static str, &'static str>> =
+    std::sync::LazyLock::new(|| {
         HashMap::from([
             ("u1", "bool"),
             ("u2", "(u1, u1)"),
@@ -24,5 +23,4 @@ lazy_static! {
             ("(u64, u64)", "u128"),
             ("(u128, u128)", "u256"),
         ])
-    };
-}
+    });
