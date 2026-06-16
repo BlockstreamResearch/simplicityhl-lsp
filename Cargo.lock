@@ -931,9 +931,8 @@ dependencies = [
 
 [[package]]
 name = "simplicityhl"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25de8990174fe3e1a843df138cacc4265d05839ebd2550c18b9196f567d55e81"
+version = "0.6.0-rc.0"
+source = "git+https://github.com/gerau/SimplicityHL.git?rev=7003d4b641a13e2310f565f234c8393da16926ed#7003d4b641a13e2310f565f234c8393da16926ed"
 dependencies = [
  "base64",
  "chumsky",
