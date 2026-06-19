@@ -46,14 +46,6 @@ jobs:
             const parsedData = JSON.parse(rawData);
             const dependencies = parsedData.dependencies;
 
-            if (!dependencies || dependencies.length === 0) {
-              return;
-            }
-
-            const dep = dependencies[0];
-            const currentVersion = dep.project;
-            const latestVersion = dep.latest;
-
             const run = context.payload.workflow_run;
             const workflow = run.name;
             const marker = `<!-- ci-failure-key:${workflow} -->`;
@@ -100,15 +92,6 @@ jobs:
               !issue.pull_request && issue.body && issue.body.includes(marker)
             );
 
-            if (run.conclusion === "failure" && !existing) {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title: titleFor(),
-                body: bodyForFailure(),
-              });
-            }
-
             if (run.conclusion === "success" && existing) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -122,5 +105,22 @@ jobs:
                 repo: context.repo.repo,
                 issue_number: existing.number,
                 state: "closed",
+              });
+            }
+
+            if (!dependencies || dependencies.length === 0) {
+              return;
+            }
+
+            const dep = dependencies[0];
+            const currentVersion = dep.project;
+            const latestVersion = dep.latest;
+
+            if (run.conclusion === "failure" && !existing) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: titleFor(),
+                body: bodyForFailure(),
               });
             }
