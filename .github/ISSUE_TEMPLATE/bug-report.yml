@@ -1,0 +1,38 @@
+name: Bug Report
+description: File a bug report
+labels: ['bug']
+assignees:
+  - gerau
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: version
+    attributes:
+      label: "Language server version"
+      placeholder: "1.2.3"
+    validations:
+      required: true
+  - type: input
+    id: text-editor
+    attributes:
+      label: "Text editor"
+      description: "Which text editor was used with the language server"
+      placeholder: "vscode | other"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A brief description of what happened and what you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction-steps
+    attributes:
+      label: "Minimal reproduction steps"
+      description: "The minimal steps needed to reproduce the bug"
+    validations:
+      required: true
