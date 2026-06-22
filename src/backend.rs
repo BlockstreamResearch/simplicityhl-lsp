@@ -383,10 +383,10 @@ impl LanguageServer for Backend {
                     detail: Some(format!("fn({params_str}) -> {return_type}")),
                     kind: SymbolKind::FUNCTION,
                     tags: None,
-                    deprecated: None,
                     range: full_range,
                     selection_range,
                     children: None,
+                    deprecated: None,
                 })
             })
             .collect();
@@ -463,21 +463,17 @@ impl LanguageServer for Backend {
 
         let pos = params.text_document_position.position;
 
-        let line = doc
-            .text
-            .lines()
-            .nth(pos.line as usize)
-            .ok_or(LspError::Internal("Rope proccesing error".into()))?;
+        let Some(line) = doc.text.lines().nth(pos.line as usize) else {
+            return Ok(None);
+        };
 
-        let slice = line
-            .get_slice(..pos.character as usize)
-            .ok_or(LspError::ConversionFailed(
-                "Rope to slice conversion failed".into(),
-            ))?;
+        let Some(slice) = line.get_slice(..pos.character as usize) else {
+            return Ok(None);
+        };
 
-        let prefix = slice.as_str().ok_or(LspError::ConversionFailed(
-            "RopeSlice to str conversion failed".into(),
-        ))?;
+        let Some(prefix) = slice.as_str() else {
+            return Ok(None);
+        };
 
         let completions = self
             .completion_provider
