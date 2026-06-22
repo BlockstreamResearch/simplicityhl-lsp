@@ -1,8 +1,11 @@
 use ropey::Rope;
 use serde_json::Value;
+use simplicityhl::ast::ElementsJetHinter;
 use simplicityhl::parse::ParseFromStrWithErrors;
+use simplicityhl::TemplateProgram;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -26,15 +29,14 @@ use tower_lsp_server::lsp_types::{
 use tower_lsp_server::{Client, LanguageServer};
 
 use miniscript::iter::TreeLike;
-use simplicityhl::{ast, error::RichError, parse};
+use simplicityhl::{error::RichError, parse};
 
 use crate::completion::{self, CompletionProvider};
 use crate::error::LspError;
 use crate::function::Functions;
 use crate::utils::{
-    create_signature_info, find_all_references, find_builtin_signature, find_function_call_context,
-    find_function_name_range, find_key_position, find_related_call, get_call_span,
-    get_comments_from_lines, offset_to_position, position_to_span, span_contains,
+    create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
+    get_call_span, get_comments_from_lines, offset_to_position, position_to_span, span_contains,
     span_to_positions,
 };
 
@@ -63,9 +65,21 @@ fn get_semantic_token_legend() -> SemanticTokensLegend {
 }
 
 #[derive(Debug)]
-struct Document {
-    functions: Functions,
-    text: Rope,
+pub struct SourceFile {
+    pub uri: Uri,
+    pub text: Rope,
+}
+
+#[derive(Debug)]
+pub struct Document {
+    /// Functions defined in file and imported modules.
+    pub functions: Functions,
+
+    /// Mapping from module id to it's Uri.
+    pub linearization_map: Vec<SourceFile>,
+
+    /// Source of given document.
+    pub text: Rope,
 }
 
 #[derive(Debug)]
@@ -209,7 +223,7 @@ impl LanguageServer for Backend {
 
         for func in &functions {
             // Add function name token (declaration)
-            if let Ok(name_range) = find_function_name_range(func, &doc.text) {
+            if let Ok(name_range) = doc.find_function_name_range(func) {
                 let len = u32::try_from(func.name().as_inner().len()).map_err(LspError::from)?;
                 raw_tokens.push((
                     name_range.start.line,
@@ -335,12 +349,16 @@ impl LanguageServer for Backend {
         let symbols: Vec<DocumentSymbol> = functions
             .iter()
             .filter_map(|func| {
+                if func.file_id() != 0 {
+                    return None;
+                }
+
                 // Get the full function range
                 let (start, end) = span_to_positions(func.span(), &doc.text).ok()?;
                 let full_range = Range { start, end };
 
                 // Get the function name range for selection
-                let selection_range = find_function_name_range(func, &doc.text).ok()?;
+                let selection_range = doc.find_function_name_range(func).ok()?;
 
                 // Build parameters detail string
                 let params_str = func
@@ -482,12 +500,11 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
-        let functions = doc.functions.functions();
 
         let token_pos = params.text_document_position_params.position;
 
         let token_span = position_to_span(token_pos, &doc.text)?;
-        let Ok(Some(call)) = find_related_call(&functions, token_span) else {
+        let Ok(Some(call)) = doc.find_related_call(token_span) else {
             return Ok(None);
         };
 
@@ -564,14 +581,14 @@ impl LanguageServer for Backend {
         let token_position = params.text_document_position_params.position;
         let token_span = position_to_span(token_position, &doc.text)?;
 
-        let Ok(Some(call)) = find_related_call(&functions, token_span) else {
+        let Ok(Some(call)) = doc.find_related_call(token_span) else {
             let Some(func) = functions
                 .iter()
                 .find(|func| span_contains(func.span(), &token_span))
             else {
                 return Ok(None);
             };
-            let range = find_function_name_range(func, &doc.text)?;
+            let range = doc.find_function_name_range(func)?;
 
             if token_position <= range.end && token_position >= range.start {
                 return Ok(Some(GotoDefinitionResponse::from(Location::new(
@@ -584,16 +601,18 @@ impl LanguageServer for Backend {
 
         match call.name() {
             simplicityhl::parse::CallName::Custom(func) => {
-                let function =
-                    doc.functions
-                        .get_func(func.as_inner())
-                        .ok_or(LspError::FunctionNotFound(format!(
-                            "Function {func} is not found"
-                        )))?;
+                let Some(function) = doc.functions.get_func(func.as_inner()) else {
+                    return Ok(None);
+                };
 
-                let (start, end) = span_to_positions(function.as_ref(), &doc.text)?;
+                let Some(source_file) = doc.linearization_map.get(function.file_id()) else {
+                    return Ok(None);
+                };
+
+                let (start, end) = span_to_positions(function.as_ref(), &source_file.text)?;
+
                 Ok(Some(GotoDefinitionResponse::from(Location::new(
-                    uri.clone(),
+                    source_file.uri.clone(),
                     Range::new(start, end),
                 ))))
             }
@@ -605,7 +624,6 @@ impl LanguageServer for Backend {
         let documents = self.document_map.read().await;
         let uri = &params.text_document_position.text_document.uri;
 
-        // Return None if document not found (e.g., file has parse errors)
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
@@ -615,21 +633,14 @@ impl LanguageServer for Backend {
 
         let token_span = position_to_span(token_position, &doc.text)?;
 
-        let call_name =
-            find_related_call(&functions, token_span)?.map(simplicityhl::parse::Call::name);
+        let call_name = doc
+            .find_related_call(token_span)?
+            .map(simplicityhl::parse::Call::name);
 
         match call_name {
             Some(parse::CallName::Custom(_)) | None => {}
             Some(name) => {
-                return Ok(Some(
-                    find_all_references(&doc.text, &functions, name)?
-                        .iter()
-                        .map(|range| Location {
-                            range: *range,
-                            uri: uri.clone(),
-                        })
-                        .collect(),
-                ));
+                return Ok(Some(doc.find_all_references(name)?));
             }
         }
 
@@ -640,22 +651,19 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let range = find_function_name_range(func, &doc.text)?;
+        let range = doc.find_function_name_range(func)?;
 
         if (token_position <= range.end && token_position >= range.start) || call_name.is_some() {
             Ok(Some(
-                find_all_references(
-                    &doc.text,
-                    &functions,
-                    &parse::CallName::Custom(func.name().clone()),
-                )?
-                .into_iter()
-                .chain(std::iter::once(range))
-                .map(|range| Location {
-                    range,
-                    uri: uri.clone(),
-                })
-                .collect(),
+                documents
+                    .values()
+                    .filter_map(|document| {
+                        document
+                            .find_all_references(&parse::CallName::Custom(func.name().clone()))
+                            .ok()
+                    })
+                    .flatten()
+                    .collect(),
             ))
         } else {
             Ok(None)
@@ -674,8 +682,10 @@ impl Backend {
 
     /// Function which executed on change of file (`did_save`, `did_open` or `did_change` methods)
     async fn on_change(&self, params: TextDocumentItem<'_>) {
+        let path = Path::new(params.uri.path().as_str());
+
         // Check if this is a witness file
-        if std::path::Path::new(params.uri.path().as_str())
+        if path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
         {
@@ -683,7 +693,7 @@ impl Backend {
             return;
         }
 
-        let (err, document) = parse_program(params.text);
+        let (err, document) = parse_program(params.text, path);
         let rope = Rope::from_str(params.text);
         let mut documents = self.document_map.write().await;
         if let Some(doc) = document {
@@ -697,6 +707,21 @@ impl Backend {
                 let Ok((start, end)) = span_to_positions(err.span(), &rope) else {
                     return None;
                 };
+
+                // HACK: We ignoring MainReqiured error because right now we cannot parse file as a
+                // library
+                match err.error() {
+                    simplicityhl::error::Error::MainRequired => return None,
+                    simplicityhl::error::Error::CannotParse { msg }
+                        if msg.clone()
+                            == simplicityhl::error::Error::MainOutOfEntryFile.to_string() =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
+
+                dbg!(err.error());
 
                 Some(Diagnostic::new_simple(
                     Range::new(start, end),
@@ -724,6 +749,7 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
     let mut document = Document {
         functions: Functions::new(),
         text: Rope::from_str(text),
+        linearization_map: Vec::new(),
     };
 
     program
@@ -752,22 +778,45 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
 
 /// Parse and analyze program using [`simplicityhl`] compiler and return an list of [`RichError`]
 /// to use in diagnostics. Also creates a [`Document`] if parsing is successfull.
-fn parse_program(text: &str) -> (Vec<RichError>, Option<Document>) {
-    let mut error_collector = simplicityhl::error::ErrorCollector::new(Arc::from(text));
-
-    let Some(program) = parse::Program::parse_from_str_with_errors(text, &mut error_collector)
+fn parse_program(text: &str, path: &Path) -> (Vec<RichError>, Option<Document>) {
+    let mut error_collector = simplicityhl::error::ErrorCollector::new();
+    let text: Arc<str> = Arc::from(text);
+    let source_file = simplicityhl::source::SourceFile::new(path, Arc::clone(&text));
+    let Some(program) =
+        parse::Program::parse_from_str_with_errors(source_file.clone(), &mut error_collector)
     else {
         return (error_collector.get().to_vec(), None);
     };
 
-    if let Err(err) = ast::Program::analyze(&program) {
-        error_collector.update([err]);
+    let mut document = create_document(&program, text.as_ref());
+
+    let Some(canon_root) = path
+        .parent()
+        .and_then(|p| simplicityhl::source::CanonPath::canonicalize(p).ok())
+    else {
+        return (error_collector.get().to_vec(), Some(document));
+    };
+
+    let dependencies = match simplicityhl::resolution::DependencyMapBuilder::new().build(canon_root)
+    {
+        Ok(deps) => deps,
+        Err(err) => {
+            error_collector.push(RichError::new(err, (0..0).into()));
+
+            return (error_collector.get().to_vec(), Some(document));
+        }
+    };
+    if let Ok(template_program) = TemplateProgram::new_with_dep(
+        source_file.try_into().expect("name was defined above"),
+        &dependencies,
+        Box::new(ElementsJetHinter::new()),
+    )
+    .map_err(|e| error_collector = e)
+    {
+        document.populate_visible_functions(&template_program);
     }
 
-    (
-        error_collector.get().to_vec(),
-        Some(create_document(&program, text)),
-    )
+    (error_collector.get().to_vec(), Some(document))
 }
 
 /// Validate a witness (.wit) file and return diagnostics.
@@ -855,7 +904,7 @@ mod tests {
 
     #[test]
     fn test_parse_program_valid() {
-        let (err, doc) = parse_program(sample_program());
+        let (err, doc) = parse_program(sample_program(), Path::new(""));
         assert!(err.is_empty(), "Expected no parsing error");
         let doc = doc.expect("Expected Some(Document)");
         assert_eq!(doc.functions.map.len(), 2);
@@ -863,7 +912,7 @@ mod tests {
 
     #[test]
     fn test_parse_program_invalid_ast() {
-        let (err, doc) = parse_program(invalid_program_on_ast());
+        let (err, doc) = parse_program(invalid_program_on_ast(), Path::new(""));
         assert!(
             err.first()
                 .expect("program should produce an error")
@@ -876,19 +925,16 @@ mod tests {
 
     #[test]
     fn test_parse_program_invalid_parse() {
-        let (err, doc) = parse_program(invalid_program_on_parsing());
-        assert_eq!(
-            err.first()
-                .expect("program should produce an error")
-                .error()
-                .clone(),
-            Error::Syntax {
-                expected: ["{".to_string()].to_vec(),
-                label: Some("function body".to_string()),
-                found: None
-            },
-            "Expected `Grammar error`"
-        );
+        let (err, doc) = parse_program(invalid_program_on_parsing(), Path::new(""));
+        match err
+            .first()
+            .expect("program should produce an error")
+            .error()
+            .clone()
+        {
+            Error::Syntax { .. } => {}
+            _ => panic!("Expected `Syntax` error"),
+        }
 
         assert!(doc.is_none(), "Expected no document to return");
     }

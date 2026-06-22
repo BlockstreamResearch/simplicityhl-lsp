@@ -1,12 +1,16 @@
-use miniscript::iter::TreeLike;
+use std::str::FromStr;
 
-use crate::completion;
-use crate::error::LspError;
 use ropey::Rope;
-use simplicityhl::parse::{self, CallName};
 use tower_lsp_server::lsp_types::{
     self, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel, SignatureInformation,
 };
+
+use miniscript::iter::TreeLike;
+use simplicityhl::parse::{self, CallName};
+
+use crate::backend::{Document, SourceFile};
+use crate::completion;
+use crate::error::LspError;
 
 pub fn span_contains(a: &simplicityhl::error::Span, b: &simplicityhl::error::Span) -> bool {
     a.start <= b.start && a.end >= b.end
@@ -164,73 +168,6 @@ pub fn get_comments_from_lines(line: u32, rope: &Rope) -> String {
     result
 }
 
-/// Find [`simplicityhl::parse::Call`] which contains given [`simplicityhl::error::Span`], which also have minimal Span.
-pub fn find_related_call<'a>(
-    functions: &'a [&'a parse::Function],
-    token_span: simplicityhl::error::Span,
-) -> Result<Option<&'a simplicityhl::parse::Call>, LspError> {
-    let func = functions
-        .iter()
-        .find(|func| span_contains(func.span(), &token_span))
-        .ok_or(LspError::CallNotFound(
-            "Span of the call is not inside function.".into(),
-        ))?;
-
-    let call = parse::ExprTree::Expression(func.body())
-        .pre_order_iter()
-        .filter_map(|expr| {
-            if let parse::ExprTree::Call(call) = expr {
-                // Only include if call span can be obtained
-                Some((call, get_call_span(call)))
-            } else {
-                None
-            }
-        })
-        .filter(|(_, span)| span_contains(span, &token_span))
-        .map(|(call, _)| call)
-        .last();
-
-    Ok(call)
-}
-
-pub fn find_function_name_range(
-    function: &parse::Function,
-    text: &Rope,
-) -> Result<lsp_types::Range, LspError> {
-    let start_line = offset_to_position(function.span().start, text)?.line;
-    let Some((line, character)) =
-        text.lines()
-            .enumerate()
-            .skip(start_line as usize)
-            .find_map(|(i, line)| {
-                line.to_string()
-                    .find(function.name().as_inner())
-                    .map(|col| (i, col))
-            })
-    else {
-        return Err(LspError::FunctionNotFound(format!(
-            "Function with name {} not found",
-            function.name()
-        )));
-    };
-
-    let func_size = u32::try_from(function.name().as_inner().len()).map_err(LspError::from)?;
-
-    let (line, character) = (
-        u32::try_from(line).map_err(LspError::from)?,
-        u32::try_from(character).map_err(LspError::from)?,
-    );
-
-    let (start, end) = (
-        lsp_types::Position { line, character },
-        lsp_types::Position {
-            line,
-            character: character + func_size,
-        },
-    );
-    Ok(lsp_types::Range { start, end })
-}
-
 pub fn get_call_span(call: &simplicityhl::parse::Call) -> simplicityhl::error::Span {
     let length = call.name().to_string().len();
 
@@ -238,34 +175,6 @@ pub fn get_call_span(call: &simplicityhl::parse::Call) -> simplicityhl::error::S
         start: call.span().start,
         end: call.span().start + length,
     }
-}
-
-pub fn find_all_references<'a>(
-    text: &Rope,
-    functions: &'a [&'a parse::Function],
-    call_name: &CallName,
-) -> Result<Vec<lsp_types::Range>, LspError> {
-    functions
-        .iter()
-        .flat_map(|func| {
-            parse::ExprTree::Expression(func.body())
-                .pre_order_iter()
-                .filter_map(|expr| {
-                    if let parse::ExprTree::Call(call) = expr {
-                        Some((call, get_call_span(call)))
-                    } else {
-                        None
-                    }
-                })
-                .filter(|(call, _)| call.name() == call_name)
-                .map(|(_, span)| span)
-                .collect::<Vec<_>>()
-        })
-        .map(|span| {
-            let (start, end) = span_to_positions(&span, text)?;
-            Ok(lsp_types::Range { start, end })
-        })
-        .collect::<Result<Vec<_>, LspError>>()
 }
 
 /// Find the position of a key in the JSON text
@@ -451,6 +360,226 @@ pub fn find_builtin_signature(name: &str) -> Option<SignatureInformation> {
     let call_name = call_name?;
     let template = completion::builtin::match_callname(&call_name)?;
     Some(create_signature_info(&template))
+}
+
+impl Document {
+    pub fn find_all_references(
+        &self,
+        call_name: &CallName,
+    ) -> Result<Vec<lsp_types::Location>, LspError> {
+        self.functions
+            .functions()
+            .iter()
+            .filter_map(|func| {
+                let uri = self.linearization_map.get(func.file_id())?;
+                Some(
+                    parse::ExprTree::Expression(func.body())
+                        .pre_order_iter()
+                        .filter_map(|expr| {
+                            if let parse::ExprTree::Call(call) = expr {
+                                Some((call, get_call_span(call)))
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|(call, _)| call.name() == call_name)
+                        .map(|(_, span)| (span, uri))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .flatten()
+            .map(|(span, source_file)| {
+                let (start, end) = span_to_positions(&span, &self.text)?;
+                Ok(lsp_types::Location {
+                    range: lsp_types::Range { start, end },
+                    uri: source_file.uri.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, LspError>>()
+    }
+
+    pub fn find_function_name_range(
+        &self,
+        function: &parse::Function,
+    ) -> Result<lsp_types::Range, LspError> {
+        let start_line = offset_to_position(function.span().start, &self.text)?.line;
+        let Some((line, character)) = self
+            .text
+            .lines()
+            .enumerate()
+            .skip(start_line as usize)
+            .find_map(|(i, line)| {
+                line.to_string()
+                    .find(function.name().as_inner())
+                    .map(|col| (i, col))
+            })
+        else {
+            return Err(LspError::FunctionNotFound(format!(
+                "Function with name {} not found",
+                function.name()
+            )));
+        };
+
+        let func_size = u32::try_from(function.name().as_inner().len()).map_err(LspError::from)?;
+
+        let (line, character) = (
+            u32::try_from(line).map_err(LspError::from)?,
+            u32::try_from(character).map_err(LspError::from)?,
+        );
+
+        let (start, end) = (
+            lsp_types::Position { line, character },
+            lsp_types::Position {
+                line,
+                character: character + func_size,
+            },
+        );
+        Ok(lsp_types::Range { start, end })
+    }
+
+    /// Find [`simplicityhl::parse::Call`] which contains given [`simplicityhl::error::Span`], which also have minimal Span.
+    pub fn find_related_call(
+        &self,
+        token_span: simplicityhl::error::Span,
+    ) -> Result<Option<&simplicityhl::parse::Call>, LspError> {
+        let func = self
+            .functions
+            .functions()
+            .into_iter()
+            .find(|func| span_contains(func.span(), &token_span) && func.file_id() == 0)
+            .ok_or(LspError::CallNotFound(
+                "Span of the call is not inside function.".into(),
+            ))?;
+
+        let call = parse::ExprTree::Expression(func.body())
+            .pre_order_iter()
+            .filter_map(|expr| {
+                if let parse::ExprTree::Call(call) = expr {
+                    // Only include if call span can be obtained
+                    Some((call, get_call_span(call)))
+                } else {
+                    None
+                }
+            })
+            .filter(|(_, span)| span_contains(span, &token_span))
+            .map(|(call, _)| call)
+            .last();
+
+        Ok(call)
+    }
+
+    /// Append functions imported via `use` declarations to [`Document`],
+    /// respecting aliases (e.g. `use crate::a::func as func2`).
+    pub fn populate_visible_functions(&mut self, template_program: &simplicityhl::TemplateProgram) {
+        let source_map = template_program.source_map();
+
+        // Populate linearization_map from module_registry.
+        let mut modules: Vec<_> = source_map.iter().map(|(p, id)| (*id, p)).collect();
+        modules.sort_by_key(|(id, _)| *id);
+
+        self.linearization_map = modules
+            .iter()
+            .map(|(file_id, path)| {
+                let uri = lsp_types::Uri::from_str(&format!("file://{}", path.as_path().display()))
+                    .expect("valid file URI");
+                let text = if *file_id == 0 {
+                    self.text.clone()
+                } else {
+                    Rope::from_str(
+                        &std::fs::read_to_string(path.as_path())
+                            .expect("failed to read module source"),
+                    )
+                };
+                SourceFile { uri, text }
+            })
+            .collect();
+
+        let resolved_program = template_program.resolved_program();
+
+        // Build global function lookup: (name, file_id) -> Function.
+        let mut global_defs: std::collections::HashMap<(&str, usize), &parse::Function> =
+            std::collections::HashMap::new();
+        for item in resolved_program.items() {
+            let parse::Item::Module(module) = item else {
+                continue;
+            };
+            let Some(file_id) = module
+                .name()
+                .as_inner()
+                .strip_prefix("unit_")
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+            for inner_item in module.items() {
+                if let parse::Item::Function(func) = inner_item {
+                    global_defs.insert((func.name().as_inner(), file_id), func);
+                }
+            }
+        }
+
+        for item in resolved_program.items() {
+            let parse::Item::Module(module) = item else {
+                continue;
+            };
+            let Some(0) = module
+                .name()
+                .as_inner()
+                .strip_prefix("unit_")
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue;
+            };
+
+            for inner_item in module.items() {
+                let parse::Item::Use(use_decl) = inner_item else {
+                    continue;
+                };
+
+                let path = use_decl.path();
+                let Some(target_module_str) = path.get(1) else {
+                    continue;
+                };
+                let Some(target_file_id) = target_module_str
+                    .as_inner()
+                    .strip_prefix("unit_")
+                    .and_then(|s| s.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+
+                if target_file_id == 0 {
+                    continue;
+                }
+
+                let items = match use_decl.items() {
+                    parse::UseItems::Single(elem) => std::slice::from_ref(elem),
+                    parse::UseItems::List(elems) => elems.as_slice(),
+                };
+
+                let Some(source_file) = self.linearization_map.get(target_file_id) else {
+                    continue;
+                };
+
+                for (original_name, alias) in items {
+                    let local_name = alias.as_ref().unwrap_or(original_name);
+
+                    let Some(func) = global_defs.get(&(original_name.as_inner(), target_file_id))
+                    else {
+                        continue;
+                    };
+
+                    let start_line = offset_to_position(func.span().start, &source_file.text)
+                        .unwrap_or_default()
+                        .line;
+                    let doc_comments = get_comments_from_lines(start_line, &source_file.text);
+
+                    self.functions
+                        .insert(local_name.to_string(), (*func).clone(), doc_comments);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
