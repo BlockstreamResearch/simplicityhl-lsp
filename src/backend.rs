@@ -26,7 +26,7 @@ use tower_lsp_server::lsp_types::{
     TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions,
     WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
-use tower_lsp_server::{Client, LanguageServer};
+use tower_lsp_server::{Client, LanguageServer, UriExt};
 
 use miniscript::iter::TreeLike;
 use simplicityhl::{error::RichError, parse};
@@ -682,7 +682,10 @@ impl Backend {
 
     /// Function which executed on change of file (`did_save`, `did_open` or `did_change` methods)
     async fn on_change(&self, params: TextDocumentItem<'_>) {
-        let path = Path::new(params.uri.path().as_str());
+        let Some(path_buf) = params.uri.to_file_path() else {
+            return;
+        };
+        let path = path_buf.as_ref();
 
         // Check if this is a witness file
         if path
