@@ -5,7 +5,7 @@ use simplicityhl::parse::ParseFromStrWithErrors;
 use simplicityhl::TemplateProgram;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,13 +18,13 @@ use tower_lsp_server::lsp_types::{
     DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, Location,
-    MarkupContent, MarkupKind, OneOf, Range, ReferenceParams, SaveOptions, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
-    SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions,
-    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    MarkupContent, MarkupKind, MessageType, OneOf, Range, ReferenceParams, SaveOptions,
+    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SymbolKind, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
+    WorkDoneProgressOptions, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
 use tower_lsp_server::{Client, LanguageServer, UriExt};
 
@@ -32,8 +32,10 @@ use miniscript::iter::TreeLike;
 use simplicityhl::{error::RichError, parse};
 
 use crate::completion::{self, CompletionProvider};
+use crate::config::Settings;
 use crate::error::LspError;
 use crate::function::Functions;
+use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::utils::{
     create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
     get_call_span, get_comments_from_lines, offset_to_position, position_to_span, span_contains,
@@ -44,6 +46,30 @@ use crate::utils::{
 mod semantic_token_types {
     pub const FUNCTION: u32 = 0;
     pub const NAMESPACE: u32 = 5;
+}
+
+/// Collect the workspace folders the client opened with, falling back to the
+/// deprecated `root_uri` for clients that do not send folders.
+fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
+    let mut roots = params
+        .workspace_folders
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .filter_map(|folder| folder.uri.to_file_path().map(std::borrow::Cow::into_owned))
+        .collect::<Vec<_>>();
+    #[allow(deprecated)]
+    if roots.is_empty() {
+        if let Some(path) = params
+            .root_uri
+            .as_ref()
+            .and_then(UriExt::to_file_path)
+            .map(std::borrow::Cow::into_owned)
+        {
+            roots.push(path);
+        }
+    }
+    roots
 }
 
 /// Get the semantic token legend for this server
@@ -88,11 +114,23 @@ pub struct Document {
     pub version: Option<i32>,
 }
 
+/// Client-supplied configuration, kept separate from the document cache so a
+/// settings change does not need the document lock.
+#[derive(Debug, Default)]
+struct ServerConfig {
+    settings: Settings,
+
+    /// Workspace folders, used to resolve relative paths in [`Settings`].
+    workspace_roots: Vec<PathBuf>,
+}
+
 #[derive(Debug)]
 pub struct Backend {
     client: Client,
 
     document_map: Arc<RwLock<HashMap<Uri, Document>>>,
+
+    config: Arc<RwLock<ServerConfig>>,
 
     completion_provider: CompletionProvider,
 }
@@ -104,7 +142,18 @@ struct TextDocumentItem<'a> {
 }
 
 impl LanguageServer for Backend {
-    async fn initialize(&self, _: InitializeParams) -> Result<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
+        let workspace_roots = workspace_roots(&params);
+        let settings = params
+            .initialization_options
+            .and_then(|value| Settings::from_json(value).ok())
+            .unwrap_or_default();
+        {
+            let mut config = self.config.write().await;
+            config.workspace_roots = workspace_roots;
+            config.settings = settings;
+        }
+
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
@@ -162,11 +211,58 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
-    async fn did_change_workspace_folders(&self, _: DidChangeWorkspaceFoldersParams) {}
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        {
+            let mut config = self.config.write().await;
+            for removed in params.event.removed {
+                if let Some(path) = removed.uri.to_file_path() {
+                    config.workspace_roots.retain(|root| root != path.as_ref());
+                }
+            }
+            for added in params.event.added {
+                if let Some(path) = added.uri.to_file_path() {
+                    let path = path.into_owned();
+                    if !config.workspace_roots.contains(&path) {
+                        config.workspace_roots.push(path);
+                    }
+                }
+            }
+        }
+        self.reanalyze_open_documents().await;
+    }
 
-    async fn did_change_configuration(&self, _: DidChangeConfigurationParams) {}
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        match Settings::from_json(params.settings) {
+            Ok(settings) => {
+                self.config.write().await.settings = settings;
+                self.reanalyze_open_documents().await;
+            }
+            Err(err) => {
+                self.client
+                    .log_message(
+                        MessageType::ERROR,
+                        format!("Invalid SimplicityHL settings: {err}"),
+                    )
+                    .await;
+            }
+        }
+    }
 
-    async fn did_change_watched_files(&self, _: DidChangeWatchedFilesParams) {}
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        // A manifest or a file elsewhere in the dependency graph changed, so results
+        // cached for the open documents may no longer be correct.
+        let relevant = params.changes.iter().any(|change| {
+            change.uri.to_file_path().is_some_and(|path| {
+                path.extension().is_some_and(|ext| ext == "simf")
+                    || path
+                        .file_name()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(SIMPLEX_MANIFEST))
+            })
+        });
+        if relevant {
+            self.reanalyze_open_documents().await;
+        }
+    }
 
     async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<Value>> {
         Ok(None)
@@ -694,7 +790,28 @@ impl Backend {
         Self {
             client,
             document_map: Arc::new(RwLock::new(HashMap::new())),
+            config: Arc::new(RwLock::new(ServerConfig::default())),
             completion_provider: CompletionProvider::new(),
+        }
+    }
+
+    /// Re-run analysis for every open document, after configuration that affects
+    /// dependency resolution has changed.
+    async fn reanalyze_open_documents(&self) {
+        let documents = {
+            let documents = self.document_map.read().await;
+            documents
+                .iter()
+                .map(|(uri, doc)| (uri.clone(), doc.text.to_string(), doc.version))
+                .collect::<Vec<_>>()
+        };
+        for (uri, text, version) in documents {
+            self.on_change(TextDocumentItem {
+                uri,
+                text: &text,
+                version,
+            })
+            .await;
         }
     }
 
@@ -714,7 +831,11 @@ impl Backend {
             return;
         }
 
-        let (err, document) = parse_program(params.text, path);
+        let (settings, workspace_roots) = {
+            let config = self.config.read().await;
+            (config.settings.clone(), config.workspace_roots.clone())
+        };
+        let (err, document) = parse_program(params.text, path, &settings, &workspace_roots);
         let rope = Rope::from_str(params.text);
         let mut documents = self.document_map.write().await;
 
@@ -813,13 +934,19 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
 
 /// Parse and analyze program using [`simplicityhl`] compiler and return an list of [`RichError`]
 /// to use in diagnostics. Also creates a [`Document`] if parsing is successful.
-fn parse_program(text: &str, path: &Path) -> (Vec<RichError>, Option<Document>) {
+fn parse_program(
+    text: &str,
+    path: &Path,
+    settings: &Settings,
+    workspace_roots: &[PathBuf],
+) -> (Vec<RichError>, Option<Document>) {
+    let unstable_features = settings.unstable_features();
     let mut error_collector = simplicityhl::error::ErrorCollector::new();
     let text: Arc<str> = Arc::from(text);
     let source_file = simplicityhl::source::SourceFile::new(path, Arc::clone(&text));
     let Some(program) = parse::Program::parse_from_str_with_errors(
         source_file.clone(),
-        &simplicityhl::UnstableFeatures::all(),
+        &unstable_features,
         &mut error_collector,
     ) else {
         return (error_collector.get().to_vec(), None);
@@ -827,18 +954,14 @@ fn parse_program(text: &str, path: &Path) -> (Vec<RichError>, Option<Document>) 
 
     let mut document = create_document(&program, text.as_ref());
 
-    let Some(canon_root) = path
-        .parent()
-        .and_then(|p| simplicityhl::source::CanonPath::canonicalize(p).ok())
-    else {
-        return (error_collector.get().to_vec(), Some(document));
-    };
-
-    let dependencies = match simplicityhl::resolution::DependencyMapBuilder::new().build(canon_root)
+    // Import roots come from the Simplex manifest and the client's settings rather than
+    // from the containing directory, so dependencies resolve the way `simplex` builds them.
+    let dependencies = match ProjectContext::discover(path, &settings.project, workspace_roots)
+        .and_then(|project| project.dependency_map(path))
     {
-        Ok(deps) => deps,
+        Ok(dependencies) => dependencies,
         Err(err) => {
-            error_collector.push(RichError::new(err, (0..0).into()));
+            error_collector.push(RichError::parsing_error(&err.to_string()));
 
             return (error_collector.get().to_vec(), Some(document));
         }
@@ -846,7 +969,7 @@ fn parse_program(text: &str, path: &Path) -> (Vec<RichError>, Option<Document>) 
     if let Ok(template_program) = TemplateProgram::new_with_dep(
         source_file.try_into().expect("name was defined above"),
         &dependencies,
-        &simplicityhl::UnstableFeatures::all(),
+        &unstable_features,
         Box::new(ElementsJetHinter::new()),
     )
     .map_err(|e| error_collector = e)
@@ -925,8 +1048,20 @@ fn validate_witness_file(text: &str) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use simplicityhl::error::Error;
+    use tempfile::TempDir;
 
     use super::*;
+
+    /// `parse_program` resolves imports from the project the file lives in, so tests
+    /// need a real path on disk rather than a placeholder.
+    fn in_temp_project(source: &str) -> (TempDir, PathBuf) {
+        let temp = TempDir::new().expect("temp dir");
+        std::fs::write(temp.path().join("Simplex.toml"), "").expect("write manifest");
+        std::fs::create_dir(temp.path().join("simf")).expect("create source dir");
+        let path = temp.path().join("simf/main.simf");
+        std::fs::write(&path, source).expect("write source");
+        (temp, path)
+    }
 
     fn sample_program() -> &'static str {
         "fn add(a: u32, b: u32) -> u32 { let (_, res): (bool, u32) = jet::add_32(a, b); res }
@@ -943,8 +1078,14 @@ mod tests {
 
     #[test]
     fn test_parse_program_valid() {
-        let (err, doc) = parse_program(sample_program(), Path::new(""));
-        assert!(err.is_empty(), "Expected no parsing error");
+        let (temp, path) = in_temp_project(sample_program());
+        let (err, doc) = parse_program(
+            sample_program(),
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+        assert!(err.is_empty(), "Expected no parsing error, got {err:?}");
         let doc = doc.expect("Expected Some(Document)");
         assert_eq!(doc.functions.map.len(), 2);
     }
@@ -952,7 +1093,13 @@ mod tests {
     #[test]
     #[ignore = "TODO we need to also create a file with a path so that could work"]
     fn test_parse_program_invalid_ast() {
-        let (err, doc) = parse_program(invalid_program_on_ast(), Path::new(""));
+        let (temp, path) = in_temp_project(invalid_program_on_ast());
+        let (err, doc) = parse_program(
+            invalid_program_on_ast(),
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
         assert!(
             err.first()
                 .expect("program should produce an error")
@@ -964,8 +1111,73 @@ mod tests {
     }
 
     #[test]
+    fn parse_program_resolves_a_manifest_dependency() {
+        // End-to-end check that the manifest drives import resolution: `math` is only
+        // reachable because Simplex.toml declares it, and `src_dir` points the package
+        // root at `contracts` rather than the default `simf`.
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        let write = |path: PathBuf, source: &str| {
+            std::fs::create_dir_all(path.parent().expect("has parent")).expect("create dir");
+            std::fs::write(path, source).expect("write file");
+        };
+        write(
+            root.join("Simplex.toml"),
+            "[build]\nsrc_dir = 'contracts'\n[dependencies]\nmath = { path = 'vendor/math' }\n",
+        );
+        write(root.join("vendor/math/Simplex.toml"), "");
+        write(
+            root.join("vendor/math/simf/ops.simf"),
+            "pub fn double(a: u32) -> u32 {\n    let (_, n): (bool, u32) = jet::add_32(a, a);\n    n\n}\n",
+        );
+
+        let source = "use math::ops::double;\nfn main() {\n    let _: u32 = double(2);\n}\n";
+        let path = root.join("contracts/main.simf");
+        write(path.clone(), source);
+
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (err, doc) = parse_program(source, &path, &settings, &[root.to_path_buf()]);
+
+        assert!(
+            err.is_empty(),
+            "expected the import to resolve, got {err:?}"
+        );
+        assert!(doc.is_some(), "expected a document");
+    }
+
+    #[test]
+    fn parse_program_reports_a_missing_configured_manifest() {
+        let (temp, path) = in_temp_project(sample_program());
+        let mut settings = Settings::default();
+        settings.project.simplex.manifest_path = "nowhere/Simplex.toml".to_string();
+
+        let (err, _) = parse_program(
+            sample_program(),
+            &path,
+            &settings,
+            &[temp.path().to_path_buf()],
+        );
+
+        assert!(
+            err.iter()
+                .any(|e| e.to_string().contains("Simplex manifest was not found")),
+            "a misconfigured manifest path should surface as a diagnostic, got {err:?}"
+        );
+    }
+
+    #[test]
     fn test_parse_program_invalid_parse() {
-        let (err, doc) = parse_program(invalid_program_on_parsing(), Path::new(""));
+        let (temp, path) = in_temp_project(invalid_program_on_parsing());
+        let (err, doc) = parse_program(
+            invalid_program_on_parsing(),
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
         match err
             .first()
             .expect("program should produce an error")

@@ -22,6 +22,57 @@ Language Server for [SimplicityHL language](https://simplicity-lang.org/).
 
 ![goto-definition](assets/goto-definition.gif)
 
+## Configuration
+
+Editors send settings under the `simplicityhl` section. Every field is optional; the
+defaults below are what the server uses when a client sends nothing.
+
+```json
+{
+  "simplicityhl": {
+    "experimentalFeatures": {
+      "imports": false
+    },
+    "project": {
+      "simplex": {
+        "enabled": true,
+        "manifestPath": ""
+      },
+      "sourceDirectory": "",
+      "dependencies": {}
+    }
+  }
+}
+```
+
+- `experimentalFeatures.imports` enables the compiler's unstable `use` / `mod` / `pub`
+  syntax. It is off by default because the feature is unstable in the compiler itself.
+- `project.simplex.enabled` looks for the nearest `Simplex.toml` (or `simplex.toml`)
+  in the file's ancestors and honours its `build.src_dir` and `[dependencies]`, resolving
+  path dependencies recursively and locating installed git dependencies under `deps/`.
+- `project.simplex.manifestPath` pins an explicit manifest instead of searching. Relative
+  values resolve from the containing workspace folder. A path that does not exist is
+  reported as a diagnostic rather than silently ignored.
+- `project.sourceDirectory` overrides the package root when there is no manifest, or when
+  the manifest's `src_dir` is not what the editor should use.
+- `project.dependencies` adds import roots by hand. They supplement the manifest and win
+  on a colliding alias:
+
+```json
+{
+  "std": "../simplicityhl-std/simf",
+  "math": { "path": "../math/simf", "context": "simf/contracts" }
+}
+```
+
+  The shorthand form maps an alias for the whole package. The detailed form restricts the
+  mapping to files under `context`, matching how the compiler scopes dependencies per
+  package.
+
+Configuration changes take effect immediately: the server re-analyses open documents on
+`workspace/didChangeConfiguration`, on workspace-folder changes, and when a watched
+`.simf` file or Simplex manifest changes on disk.
+
 ## Installation
 
 Install Language Server using `cargo`:
@@ -47,7 +98,16 @@ vim.filetype.add({
 	},
 })
 
-vim.lsp.config["simplicityhl-lsp"] = { cmd = { "simplicityhl-lsp" }, filetypes = { "simf" }, settings = {} }
+vim.lsp.config["simplicityhl-lsp"] = {
+	cmd = { "simplicityhl-lsp" },
+	filetypes = { "simf" },
+	settings = {
+		simplicityhl = {
+			experimentalFeatures = { imports = true },
+			project = { simplex = { enabled = true, manifestPath = "" } },
+		},
+	},
+}
 vim.lsp.enable("simplicityhl-lsp")
 ```
 
