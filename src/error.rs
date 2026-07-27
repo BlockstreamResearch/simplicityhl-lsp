@@ -3,7 +3,6 @@ use std::num::TryFromIntError;
 use thiserror::Error;
 
 use tower_lsp_server::jsonrpc::Error;
-use tower_lsp_server::lsp_types::Uri;
 
 /// Custom error type for LSP server.
 #[derive(Debug, Clone, Error)]
@@ -24,10 +23,6 @@ pub enum LspError {
     #[error("Call not found: {0}")]
     CallNotFound(String),
 
-    /// Failed to find given document inside `documents` map.
-    #[error("Document not found: {0:?}")]
-    DocumentNotFound(Uri),
-
     /// A generic or unexpected internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -43,7 +38,7 @@ impl LspError {
             LspError::ConversionFailed(_) => 1,
             LspError::FunctionNotFound(_) => 2,
             LspError::CallNotFound(_) => 3,
-            LspError::DocumentNotFound(_) => 4,
+            // 4 was `DocumentNotFound`; left unused so the remaining codes stay stable.
             LspError::IntegerConversionFailed(_) => 5,
             LspError::Internal(_) => 100,
         }

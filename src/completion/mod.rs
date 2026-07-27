@@ -55,7 +55,7 @@ impl CompletionProvider {
             .map(|(&to, &from)| CompletionItem {
                 label: format!("{to} <- {from}"),
                 kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("Cast into type `{to}`",)),
+                detail: Some(format!("Cast into type `{to}`")),
                 documentation: None,
                 insert_text: Some(format!("{from}>::into(${{1:{from}}})")),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
@@ -100,7 +100,7 @@ impl CompletionProvider {
                     return Some(vec![CompletionItem {
                         label: format!("{to} <- {from}"),
                         kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(format!("Cast into type `{to}`",)),
+                        detail: Some(format!("Cast into type `{to}`")),
                         documentation: None,
                         insert_text: Some(format!("{from}>::into(${{1:{from}}})")),
                         insert_text_format: Some(InsertTextFormat::SNIPPET),

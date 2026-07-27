@@ -80,6 +80,12 @@ pub struct Document {
 
     /// Source of given document.
     pub text: Rope,
+
+    /// Version of the text this document was built from, when the client supplied one.
+    ///
+    /// Notifications are served concurrently and complete out of order, so a slow
+    /// analysis must not overwrite the result of a newer edit.
+    pub version: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -176,8 +182,14 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        // Sync is `FULL`, so the last change holds the whole document. Indexing the first
+        // element instead would panic on the empty list some clients send, and would use
+        // stale text whenever a client batches several changes into one notification.
+        let Some(change) = params.content_changes.into_iter().next_back() else {
+            return;
+        };
         self.on_change(TextDocumentItem {
-            text: &params.content_changes[0].text,
+            text: &change.text,
             uri: params.text_document.uri,
             version: Some(params.text_document.version),
         })
@@ -195,7 +207,13 @@ impl LanguageServer for Backend {
         }
     }
 
-    async fn did_close(&self, _: DidCloseTextDocumentParams) {}
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let uri = params.text_document.uri;
+        // Without this the parsed document is retained for the rest of the session and the
+        // editor keeps showing the diagnostics published for a file that is no longer open.
+        self.document_map.write().await.remove(&uri);
+        self.client.publish_diagnostics(uri, Vec::new(), None).await;
+    }
 
     async fn semantic_tokens_full(
         &self,
@@ -699,10 +717,25 @@ impl Backend {
         let (err, document) = parse_program(params.text, path);
         let rope = Rope::from_str(params.text);
         let mut documents = self.document_map.write().await;
-        if let Some(doc) = document {
+
+        // Analysis above runs without the lock, so a concurrent notification for a newer
+        // version may already have stored its result. Dropping the stale write keeps the
+        // map consistent with the latest text the client sent.
+        let stored_version = documents.get(&params.uri).and_then(|doc| doc.version);
+        if matches!((params.version, stored_version), (Some(incoming), Some(stored)) if incoming < stored)
+        {
+            return;
+        }
+        // `did_save` carries no version; keep the one already recorded rather than
+        // clearing it, so later edits can still be ordered against it.
+        let version = params.version.or(stored_version);
+
+        if let Some(mut doc) = document {
+            doc.version = version;
             documents.insert(params.uri.clone(), doc);
         } else if let Some(doc) = documents.get_mut(&params.uri) {
             doc.text = rope.clone();
+            doc.version = version;
         }
         let diagnostics = err
             .iter()
@@ -751,6 +784,7 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
         functions: Functions::new(),
         text: Rope::from_str(text),
         linearization_map: Vec::new(),
+        version: None,
     };
 
     program

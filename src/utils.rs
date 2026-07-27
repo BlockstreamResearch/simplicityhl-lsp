@@ -199,9 +199,10 @@ pub fn find_function_call_context(line: &str) -> Option<(String, u32)> {
     let mut last_open_paren = None;
     let mut comma_count = 0;
 
-    // Scan from the end to find the innermost unclosed function call
-    for (i, ch) in line.chars().rev().enumerate() {
-        let pos = line.len() - 1 - i;
+    // Scan from the end to find the innermost unclosed function call.
+    // `char_indices` yields byte offsets, which is what `line` must be sliced by below;
+    // counting characters instead would mis-address every byte after a multi-byte character.
+    for (pos, ch) in line.char_indices().rev() {
         match ch {
             ')' => paren_depth += 1,
             '(' => {
@@ -214,17 +215,9 @@ pub fn find_function_call_context(line: &str) -> Option<(String, u32)> {
                 }
             }
             ']' => bracket_depth += 1,
-            '[' => {
-                if bracket_depth > 0 {
-                    bracket_depth -= 1;
-                }
-            }
+            '[' if bracket_depth > 0 => bracket_depth -= 1,
             '>' => angle_depth += 1,
-            '<' => {
-                if angle_depth > 0 {
-                    angle_depth -= 1;
-                }
-            }
+            '<' if angle_depth > 0 => angle_depth -= 1,
             ',' if paren_depth == 0 && bracket_depth == 0 && angle_depth == 0 => {
                 comma_count += 1;
             }
@@ -248,15 +241,16 @@ pub fn extract_function_name(text: &str) -> Option<String> {
 
     // Skip generic parameters if present (e.g., `fold::<f, 8>`)
     let without_generics = if trimmed.ends_with('>') {
-        let mut depth = 0;
+        let mut depth = 0usize;
         let mut start = None;
-        for (i, ch) in trimmed.chars().rev().enumerate() {
+        // As above, `char_indices` keeps `start` a valid byte offset into `trimmed`.
+        for (i, ch) in trimmed.char_indices().rev() {
             match ch {
                 '>' => depth += 1,
                 '<' => {
-                    depth -= 1;
+                    depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        start = Some(trimmed.len() - 1 - i);
+                        start = Some(i);
                         break;
                     }
                 }
@@ -730,5 +724,29 @@ mod tests {
             .expect("UTF-16 column after a BMP multibyte char should convert correctly");
 
         assert_eq!(offset, 2);
+    }
+
+    #[test]
+    fn test_find_function_call_context_handles_multibyte_arguments() {
+        assert_eq!(
+            find_function_call_context("add(é, "),
+            Some(("add".to_string(), 1))
+        );
+        assert_eq!(
+            find_function_call_context("sum(日本, "),
+            Some(("sum".to_string(), 1))
+        );
+        assert_eq!(
+            find_function_call_context("f(éé"),
+            Some(("f".to_string(), 0))
+        );
+    }
+
+    #[test]
+    fn test_extract_function_name_handles_multibyte_before_generics() {
+        assert_eq!(
+            extract_function_name("é; fold::<f, 8>"),
+            Some("fold".to_string())
+        );
     }
 }
