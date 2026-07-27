@@ -2,8 +2,10 @@
 
 mod backend;
 mod completion;
+mod config;
 mod error;
 mod function;
+mod project;
 mod utils;
 
 use backend::Backend;
