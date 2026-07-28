@@ -12,7 +12,7 @@ use crate::completion;
 use crate::error::LspError;
 
 pub fn span_contains(a: &simplicityhl::error::Span, b: &simplicityhl::error::Span) -> bool {
-    a.start <= b.start && a.end >= b.end
+    a.file_id == b.file_id && a.start <= b.start && a.end >= b.end
 }
 
 /// Convert byte offset to [`lsp_types::Position`].
@@ -105,7 +105,7 @@ pub fn position_to_span(
 ) -> Result<simplicityhl::error::Span, LspError> {
     let start_line = position_to_offset(position, rope)?;
 
-    Ok(simplicityhl::error::Span::new(start_line, start_line))
+    Ok(simplicityhl::error::Span::new(0, start_line..start_line))
 }
 
 /// Get document comments, using lines above given line index. Only used to
@@ -170,10 +170,10 @@ pub fn get_comments_from_lines(line: u32, rope: &Rope) -> String {
 pub fn get_call_span(call: &simplicityhl::parse::Call) -> simplicityhl::error::Span {
     let length = call.name().to_string().len();
 
-    simplicityhl::error::Span {
-        start: call.span().start,
-        end: call.span().start + length,
-    }
+    simplicityhl::error::Span::new(
+        call.span().file_id,
+        call.span().start..call.span().start + length,
+    )
 }
 
 /// Find the position of a key in the JSON text
@@ -364,7 +364,7 @@ impl Document {
             .functions()
             .iter()
             .filter_map(|func| {
-                let uri = self.linearization_map.get(func.file_id())?;
+                let uri = self.linearization_map.get(func.span().file_id)?;
                 Some(
                     parse::ExprTree::Expression(func.body())
                         .pre_order_iter()
@@ -439,7 +439,7 @@ impl Document {
             .functions
             .functions()
             .into_iter()
-            .find(|func| span_contains(func.span(), &token_span) && func.file_id() == 0)
+            .find(|func| span_contains(func.span(), &token_span) && func.span().file_id == 0)
             .ok_or(LspError::CallNotFound(
                 "Span of the call is not inside function.".into(),
             ))?;
@@ -464,7 +464,9 @@ impl Document {
     /// Append functions imported via `use` declarations to [`Document`],
     /// respecting aliases (e.g. `use crate::a::func as func2`).
     pub fn populate_visible_functions(&mut self, template_program: &simplicityhl::TemplateProgram) {
-        let source_map = template_program.source_map();
+        let Some(source_map) = template_program.source_map() else {
+            return;
+        };
 
         // Populate linearization_map from module_registry.
         let mut modules: Vec<_> = source_map.iter().map(|(p, id)| (*id, p)).collect();
@@ -673,7 +675,7 @@ mod tests {
         let text = Rope::from_str("/// π\nfn foo() {}");
 
         // "/// " = 4 bytes, "π" = 2 bytes, "\n" = 1 byte, so `fn` starts at byte 7.
-        let span = simplicityhl::error::Span::new(7, 9);
+        let span = simplicityhl::error::Span::new(0, 7..9);
 
         let (start, end) = span_to_positions(&span, &text).expect("span conversion should succeed");
 
@@ -712,7 +714,7 @@ mod tests {
             .expect("identifier start should map to the same byte offset");
 
         assert_eq!(offset, 4);
-        assert_eq!(span, simplicityhl::error::Span::new(4, 4));
+        assert_eq!(span, simplicityhl::error::Span::new(0, 4..4));
     }
 
     #[test]
