@@ -20,8 +20,8 @@ pub struct Settings {
 pub struct ExperimentalFeatures {
     /// Enables `use`, `mod`, `pub`, aliases, and multi-file dependency resolution.
     pub imports: bool,
-    // TODO: `enums` is absent: `UnstableFeature::Enums` does not exist in the
-    // released compiler, so the setting would silently do nothing.
+    /// Enables enum declarations and enum match patterns.
+    pub enums: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -98,6 +98,9 @@ impl Settings {
         if self.experimental_features.imports {
             enabled.push(UnstableFeature::Imports);
         }
+        if self.experimental_features.enums {
+            enabled.push(UnstableFeature::Enums);
+        }
         UnstableFeatures::new(enabled)
     }
 }
@@ -111,6 +114,7 @@ mod tests {
         let settings = Settings::default();
 
         assert!(!settings.experimental_features.imports);
+        assert!(!settings.experimental_features.enums);
         assert!(settings.project.simplex.enabled);
     }
 
@@ -132,6 +136,7 @@ mod tests {
         .expect("valid settings");
 
         assert!(settings.experimental_features.imports);
+        assert!(!settings.experimental_features.enums);
         assert_eq!(
             settings.project.simplex.manifest_path,
             "config/Simplex.toml"
@@ -145,12 +150,12 @@ mod tests {
 
     #[test]
     fn accepts_an_unwrapped_configuration_section() {
-        // `enums` is not a field yet; an editor that still sends it must not break parsing.
         let settings = Settings::from_json(serde_json::json!({
             "experimentalFeatures": { "imports": true, "enums": true }
         }))
         .expect("valid settings");
 
         assert!(settings.experimental_features.imports);
+        assert!(settings.experimental_features.enums);
     }
 }

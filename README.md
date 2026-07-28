@@ -31,7 +31,8 @@ defaults below are what the server uses when a client sends nothing.
 {
   "simplicityhl": {
     "experimentalFeatures": {
-      "imports": false
+      "imports": false,
+      "enums": false
     },
     "project": {
       "simplex": {
@@ -47,6 +48,8 @@ defaults below are what the server uses when a client sends nothing.
 
 - `experimentalFeatures.imports` enables the compiler's unstable `use` / `mod` / `pub`
   syntax. It is off by default because the feature is unstable in the compiler itself.
+- `experimentalFeatures.enums` enables enum declarations and enum match patterns,
+  likewise unstable in the compiler.
 - `project.simplex.enabled` looks for the nearest `Simplex.toml` (or `simplex.toml`)
   in the file's ancestors and honours its `build.src_dir` and `[dependencies]`, resolving
   path dependencies recursively and locating installed git dependencies under `deps/`.
@@ -103,7 +106,7 @@ vim.lsp.config["simplicityhl-lsp"] = {
 	filetypes = { "simf" },
 	settings = {
 		simplicityhl = {
-			experimentalFeatures = { imports = true },
+			experimentalFeatures = { imports = true, enums = false },
 			project = { simplex = { enabled = true, manifestPath = "" } },
 		},
 	},
