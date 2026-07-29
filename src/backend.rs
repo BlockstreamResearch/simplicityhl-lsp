@@ -12,14 +12,15 @@ use tokio::sync::RwLock;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, Location,
-    MarkupContent, MarkupKind, MessageType, OneOf, Range, ReferenceParams, SaveOptions,
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
+    FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    Location, MarkupContent, MarkupKind, MessageType, OneOf, Range, ReferenceParams, Registration,
+    SaveOptions, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
     SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
     SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
     SignatureHelpOptions, SignatureHelpParams, SymbolKind, TextDocumentSyncCapability,
@@ -29,7 +30,11 @@ use tower_lsp_server::lsp_types::{
 use tower_lsp_server::{Client, LanguageServer, UriExt};
 
 use miniscript::iter::TreeLike;
-use simplicityhl::{error::RichError, parse};
+use simplicityhl::error::{
+    Diagnostic as CompilerDiagnostic, DiagnosticManager, Error as CompilerError,
+    Location as CompilerLocation, Severity as CompilerSeverity, Span,
+};
+use simplicityhl::parse;
 
 use crate::completion::{self, CompletionProvider};
 use crate::config::Settings;
@@ -122,6 +127,9 @@ struct ServerConfig {
 
     /// Workspace folders, used to resolve relative paths in [`Settings`].
     workspace_roots: Vec<PathBuf>,
+
+    /// Whether the client supports server-requested file watchers.
+    watched_files_registration: bool,
 }
 
 #[derive(Debug)]
@@ -144,6 +152,13 @@ struct TextDocumentItem<'a> {
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let workspace_roots = workspace_roots(&params);
+        let watched_files_registration = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files.as_ref())
+            .and_then(|capability| capability.dynamic_registration)
+            .unwrap_or(false);
         let settings = params
             .initialization_options
             .and_then(|value| Settings::from_json(value).ok())
@@ -151,6 +166,7 @@ impl LanguageServer for Backend {
         {
             let mut config = self.config.write().await;
             config.workspace_roots = workspace_roots;
+            config.watched_files_registration = watched_files_registration;
             config.settings = settings;
         }
 
@@ -205,7 +221,35 @@ impl LanguageServer for Backend {
         })
     }
 
-    async fn initialized(&self, _: InitializedParams) {}
+    async fn initialized(&self, _: InitializedParams) {
+        if !self.config.read().await.watched_files_registration {
+            return;
+        }
+
+        let watchers = ["**/*.simf", "**/Simplex.toml", "**/simplex.toml"]
+            .into_iter()
+            .map(|glob| FileSystemWatcher {
+                glob_pattern: GlobPattern::String(glob.to_string()),
+                kind: None,
+            })
+            .collect();
+        let registration = Registration {
+            id: "simplicityhl-lsp-watched-files".to_string(),
+            method: "workspace/didChangeWatchedFiles".to_string(),
+            register_options: serde_json::to_value(DidChangeWatchedFilesRegistrationOptions {
+                watchers,
+            })
+            .ok(),
+        };
+        if let Err(error) = self.client.register_capability(vec![registration]).await {
+            self.client
+                .log_message(
+                    MessageType::WARNING,
+                    format!("Unable to register file watchers: {error}"),
+                )
+                .await;
+        }
+    }
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
@@ -336,7 +380,7 @@ impl LanguageServer for Backend {
         let mut raw_tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, col, len, type, modifiers)
 
         for func in &functions {
-            if func.file_id() != 0 {
+            if func.span().file_id != 0 {
                 continue;
             }
 
@@ -467,7 +511,7 @@ impl LanguageServer for Backend {
         let symbols: Vec<DocumentSymbol> = functions
             .iter()
             .filter_map(|func| {
-                if func.file_id() != 0 {
+                if func.span().file_id != 0 {
                     return None;
                 }
 
@@ -719,7 +763,7 @@ impl LanguageServer for Backend {
                     return Ok(None);
                 };
 
-                let Some(source_file) = doc.linearization_map.get(function.file_id()) else {
+                let Some(source_file) = doc.linearization_map.get(function.span().file_id) else {
                     return Ok(None);
                 };
 
@@ -861,10 +905,6 @@ impl Backend {
         let diagnostics = err
             .iter()
             .filter_map(|err| {
-                let Ok((start, end)) = span_to_positions(err.span(), &rope) else {
-                    return None;
-                };
-
                 // HACK: We ignoring MainRequired error because right now we cannot parse file as a
                 // library
                 match err.error() {
@@ -878,10 +918,33 @@ impl Backend {
                     _ => {}
                 }
 
-                Some(Diagnostic::new_simple(
-                    Range::new(start, end),
-                    err.error().to_string(),
-                ))
+                // This merged backend owns one open document at a time. Compiler 0.7
+                // diagnostics can point into imported files;
+                // TODO: until multi-document publication is implemented, keep those visible on the
+                // root document without pretending their byte offsets belong to the root source.
+                let range = match err.location() {
+                    CompilerLocation::Code(span) if span.file_id == 0 => {
+                        let Ok((start, end)) = span_to_positions(span, &rope) else {
+                            return None;
+                        };
+                        Range::new(start, end)
+                    }
+                    CompilerLocation::Code(_)
+                    | CompilerLocation::File(_)
+                    | CompilerLocation::Global => Range::default(),
+                };
+                let severity = match err.severity() {
+                    CompilerSeverity::Error => DiagnosticSeverity::ERROR,
+                    CompilerSeverity::Warning => DiagnosticSeverity::WARNING,
+                };
+
+                Some(Diagnostic {
+                    range,
+                    severity: Some(severity),
+                    source: Some("simplicityhl".to_string()),
+                    message: err.error().to_string(),
+                    ..Diagnostic::default()
+                })
             })
             .collect();
 
@@ -932,24 +995,25 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
     document
 }
 
-/// Parse and analyze program using [`simplicityhl`] compiler and return an list of [`RichError`]
-/// to use in diagnostics. Also creates a [`Document`] if parsing is successful.
+/// Parse and analyze a program using the [`simplicityhl`] compiler.
+/// Also create a [`Document`] when parsing succeeds.
 fn parse_program(
     text: &str,
     path: &Path,
     settings: &Settings,
     workspace_roots: &[PathBuf],
-) -> (Vec<RichError>, Option<Document>) {
+) -> (Vec<CompilerDiagnostic>, Option<Document>) {
     let unstable_features = settings.unstable_features();
-    let mut error_collector = simplicityhl::error::ErrorCollector::new();
+    let mut diagnostics = DiagnosticManager::new();
     let text: Arc<str> = Arc::from(text);
     let source_file = simplicityhl::source::SourceFile::new(path, Arc::clone(&text));
     let Some(program) = parse::Program::parse_from_str_with_errors(
-        source_file.clone(),
+        0,
+        text.as_ref(),
         &unstable_features,
-        &mut error_collector,
+        &mut diagnostics,
     ) else {
-        return (error_collector.get().to_vec(), None);
+        return (diagnostics.diagnostics().to_vec(), None);
     };
 
     let mut document = create_document(&program, text.as_ref());
@@ -961,23 +1025,30 @@ fn parse_program(
     {
         Ok(dependencies) => dependencies,
         Err(err) => {
-            error_collector.push(RichError::parsing_error(&err.to_string()));
+            diagnostics.push(CompilerDiagnostic::new(
+                CompilerError::CannotParse {
+                    msg: err.to_string(),
+                },
+                Span::new(0, 0..0),
+            ));
 
-            return (error_collector.get().to_vec(), Some(document));
+            return (diagnostics.diagnostics().to_vec(), Some(document));
         }
     };
-    if let Ok(template_program) = TemplateProgram::new_with_dep(
+    let compiler_diagnostics = match TemplateProgram::new_with_dep(
         source_file.try_into().expect("name was defined above"),
         &dependencies,
         &unstable_features,
         Box::new(ElementsJetHinter::new()),
-    )
-    .map_err(|e| error_collector = e)
-    {
-        document.populate_visible_functions(&template_program);
-    }
+    ) {
+        Ok(template_program) => {
+            document.populate_visible_functions(&template_program);
+            template_program.diagnostics().diagnostics().to_vec()
+        }
+        Err(diagnostics) => diagnostics.diagnostics().to_vec(),
+    };
 
-    (error_collector.get().to_vec(), Some(document))
+    (compiler_diagnostics, Some(document))
 }
 
 /// Validate a witness (.wit) file and return diagnostics.
@@ -1088,6 +1159,37 @@ mod tests {
         assert!(err.is_empty(), "Expected no parsing error, got {err:?}");
         let doc = doc.expect("Expected Some(Document)");
         assert_eq!(doc.functions.map.len(), 2);
+    }
+
+    #[test]
+    fn parse_program_respects_the_enum_feature_setting() {
+        let source = "enum Choice { Yes, No, }\nfn main() {}\n";
+        let (temp, path) = in_temp_project(source);
+
+        let (disabled, _) = parse_program(
+            source,
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+        assert!(disabled.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.error(),
+                Error::UnstableFeature {
+                    feature: simplicityhl::UnstableFeature::Enums
+                }
+            )
+        }));
+
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": false, "enums": true }
+        }))
+        .expect("valid settings");
+        let (enabled, document) =
+            parse_program(source, &path, &settings, &[temp.path().to_path_buf()]);
+
+        assert!(enabled.is_empty(), "enum should be enabled: {enabled:?}");
+        assert!(document.is_some());
     }
 
     #[test]
