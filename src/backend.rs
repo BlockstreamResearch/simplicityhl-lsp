@@ -12,20 +12,21 @@ use tokio::sync::RwLock;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
-    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
-    FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    Location, MarkupContent, MarkupKind, MessageType, OneOf, Range, ReferenceParams, Registration,
-    SaveOptions, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
-    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
-    SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp,
-    SignatureHelpOptions, SignatureHelpParams, SymbolKind, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri,
-    WorkDoneProgressOptions, WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
+    DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandParams, FileSystemWatcher, GlobPattern, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind, MessageType, OneOf,
+    Range, ReferenceParams, Registration, SaveOptions, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
+    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
+    SignatureHelpParams, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions,
+    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
 };
 use tower_lsp_server::{Client, LanguageServer, UriExt};
 
@@ -34,17 +35,20 @@ use simplicityhl::error::{
     Diagnostic as CompilerDiagnostic, DiagnosticManager, Error as CompilerError,
     Location as CompilerLocation, Severity as CompilerSeverity, Span,
 };
-use simplicityhl::parse;
+use simplicityhl::resolution::DependencyMap;
+use simplicityhl::source::CanonSourceFile;
+use simplicityhl::{parse, UnstableFeatures};
 
 use crate::completion::{self, CompletionProvider};
 use crate::config::Settings;
 use crate::error::LspError;
 use crate::function::Functions;
+use crate::imports::{self, ImportCompletionContext};
 use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::utils::{
     create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
-    get_call_span, get_comments_from_lines, offset_to_position, position_to_span, span_contains,
-    span_to_positions,
+    get_call_span, get_comments_from_lines, offset_to_position, position_to_offset,
+    position_to_span, span_contains, span_to_positions,
 };
 
 /// Semantic token type indices - must match the legend order
@@ -185,7 +189,15 @@ impl LanguageServer for Backend {
                 )),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(false),
-                    trigger_characters: Some(vec![":".to_string(), "<".to_string()]),
+                    // `:`, space, `{`, and `,` cover the useful stages of a `use`
+                    // declaration. `<` remains the trigger for type-cast completion.
+                    trigger_characters: Some(vec![
+                        ":".to_string(),
+                        "<".to_string(),
+                        " ".to_string(),
+                        "{".to_string(),
+                        ",".to_string(),
+                    ]),
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                     all_commit_characters: None,
                     completion_item: None,
@@ -611,31 +623,46 @@ impl LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
-        let documents = self.document_map.read().await;
         let uri = &params.text_document_position.text_document.uri;
-
-        // Return None if document not found (e.g., file has parse errors)
-        let Some(doc) = documents.get(uri) else {
-            return Ok(None);
-        };
-
         let pos = params.text_document_position.position;
-
-        let Some(line) = doc.text.lines().nth(pos.line as usize) else {
-            return Ok(None);
+        let (source_prefix, functions) = {
+            let documents = self.document_map.read().await;
+            let Some(doc) = documents.get(uri) else {
+                return Ok(None);
+            };
+            let Ok(offset) = position_to_offset(pos, &doc.text) else {
+                return Ok(None);
+            };
+            let Some(prefix) = doc.text.get_byte_slice(..offset) else {
+                return Ok(None);
+            };
+            (prefix.to_string(), doc.functions.clone())
         };
 
-        let Some(slice) = line.get_slice(..pos.character as usize) else {
-            return Ok(None);
-        };
+        if let Some(context) = ImportCompletionContext::at(&source_prefix, source_prefix.len()) {
+            return Ok(self
+                .import_completion(uri, &source_prefix, &context)
+                .await
+                .map(CompletionResponse::Array));
+        }
 
-        let Some(prefix) = slice.as_str() else {
+        // The extra trigger characters above exist solely for import completion. Avoid opening
+        // the generic function list after every space, comma, or block brace in normal code.
+        if params
+            .context
+            .as_ref()
+            .and_then(|context| context.trigger_character.as_deref())
+            .is_some_and(|character| matches!(character, " " | "{" | ","))
+        {
             return Ok(None);
-        };
+        }
 
+        let prefix = source_prefix
+            .rsplit_once('\n')
+            .map_or(source_prefix.as_str(), |(_, line)| line);
         let completions = self
             .completion_provider
-            .process_completions(prefix, &doc.functions.functions_and_docs())
+            .process_completions(prefix, &functions.functions_and_docs())
             .map(CompletionResponse::Array);
 
         Ok(completions)
@@ -662,7 +689,7 @@ impl LanguageServer for Backend {
         let token_pos = params.text_document_position_params.position;
 
         let token_span = position_to_span(token_pos, &doc.text)?;
-        let Ok(Some(call)) = doc.find_related_call(token_span) else {
+        let Some(call) = doc.find_related_call(token_span) else {
             return Ok(None);
         };
 
@@ -739,7 +766,7 @@ impl LanguageServer for Backend {
         let token_position = params.text_document_position_params.position;
         let token_span = position_to_span(token_position, &doc.text)?;
 
-        let Ok(Some(call)) = doc.find_related_call(token_span) else {
+        let Some(call) = doc.find_related_call(token_span) else {
             let Some(func) = functions
                 .iter()
                 .find(|func| span_contains(func.span(), &token_span))
@@ -792,7 +819,7 @@ impl LanguageServer for Backend {
         let token_span = position_to_span(token_position, &doc.text)?;
 
         let call_name = doc
-            .find_related_call(token_span)?
+            .find_related_call(token_span)
             .map(simplicityhl::parse::Call::name);
 
         match call_name {
@@ -809,23 +836,24 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let range = doc.find_function_name_range(func)?;
-
-        if (token_position <= range.end && token_position >= range.start) || call_name.is_some() {
-            Ok(Some(
-                documents
-                    .values()
-                    .filter_map(|document| {
-                        document
-                            .find_all_references(&parse::CallName::Custom(func.name().clone()))
-                            .ok()
-                    })
-                    .flatten()
-                    .collect(),
-            ))
-        } else {
-            Ok(None)
+        if call_name.is_none() {
+            let range = doc.find_function_name_range(func)?;
+            if !(range.start..=range.end).contains(&token_position) {
+                return Ok(None);
+            }
         }
+
+        Ok(Some(
+            documents
+                .values()
+                .filter_map(|document| {
+                    document
+                        .find_all_references(&parse::CallName::Custom(func.name().clone()))
+                        .ok()
+                })
+                .flatten()
+                .collect(),
+        ))
     }
 }
 
@@ -837,6 +865,31 @@ impl Backend {
             config: Arc::new(RwLock::new(ServerConfig::default())),
             completion_provider: CompletionProvider::new(),
         }
+    }
+
+    async fn import_completion(
+        &self,
+        uri: &Uri,
+        source: &str,
+        context: &ImportCompletionContext,
+    ) -> Option<Vec<CompletionItem>> {
+        let path = uri.to_file_path()?;
+        let (project_settings, workspace_roots) = {
+            let config = self.config.read().await;
+            if !config.settings.experimental_features.imports {
+                return None;
+            }
+            (
+                config.settings.project.clone(),
+                config.workspace_roots.clone(),
+            )
+        };
+
+        Some(
+            ProjectContext::discover(path.as_ref(), &project_settings, &workspace_roots)
+                .map(|project| imports::complete_import(context, source, path.as_ref(), &project))
+                .unwrap_or_default(),
+        )
     }
 
     /// Re-run analysis for every open document, after configuration that affects
@@ -895,13 +948,16 @@ impl Backend {
         // clearing it, so later edits can still be ordered against it.
         let version = params.version.or(stored_version);
 
-        if let Some(mut doc) = document {
-            doc.version = version;
-            documents.insert(params.uri.clone(), doc);
-        } else if let Some(doc) = documents.get_mut(&params.uri) {
-            doc.text = rope.clone();
-            doc.version = version;
-        }
+        // A parse failure invalidates every old analysis span, but the latest text must remain
+        // available so completion still works while the user is typing incomplete syntax.
+        let mut document = document.unwrap_or_else(|| Document {
+            functions: Functions::new(),
+            linearization_map: Vec::new(),
+            text: rope.clone(),
+            version,
+        });
+        document.version = version;
+        documents.insert(params.uri.clone(), document);
         let diagnostics = err
             .iter()
             .filter_map(|err| {
@@ -995,6 +1051,134 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
     document
 }
 
+fn items_contain_main(items: &[parse::Item]) -> bool {
+    items.iter().any(|item| match item {
+        parse::Item::Function(function) => function.name().as_inner() == "main",
+        parse::Item::Module(module) => items_contain_main(module.items()),
+        parse::Item::TypeAlias(_)
+        | parse::Item::Use(_)
+        | parse::Item::EnumDeclaration(_)
+        | parse::Item::Ignored => false,
+    })
+}
+
+/// Find the root-file import that pulls another `main` function into the flattened program.
+///
+/// The compiler currently attaches `FunctionRedefined(main)` to the entire flattened program.
+/// For an editor diagnostic, the actionable source location is the `use` declaration that loaded
+/// the file containing the extra entry point.
+fn imported_main_span(
+    items: &[parse::Item],
+    current_source: &CanonSourceFile,
+    dependencies: &DependencyMap,
+    unstable_features: &UnstableFeatures,
+) -> Option<Span> {
+    for item in items {
+        match item {
+            parse::Item::Use(use_decl) => {
+                let Ok(target) = dependencies.resolve_path(current_source.name(), use_decl) else {
+                    continue;
+                };
+
+                // `use crate::<this file>::...` does not introduce another source file.
+                if &target == current_source.name() {
+                    continue;
+                }
+
+                let Ok(source) = std::fs::read_to_string(target.as_path()) else {
+                    continue;
+                };
+                let mut diagnostics = DiagnosticManager::new();
+                let Some(program) = parse::Program::parse_from_str_with_errors(
+                    0,
+                    &source,
+                    unstable_features,
+                    &mut diagnostics,
+                ) else {
+                    continue;
+                };
+
+                if items_contain_main(program.items()) {
+                    return Some(*use_decl.span());
+                }
+            }
+            parse::Item::Module(module) => {
+                if let Some(span) = imported_main_span(
+                    module.items(),
+                    current_source,
+                    dependencies,
+                    unstable_features,
+                ) {
+                    return Some(span);
+                }
+            }
+            parse::Item::TypeAlias(_)
+            | parse::Item::Function(_)
+            | parse::Item::EnumDeclaration(_)
+            | parse::Item::Ignored => {}
+        }
+    }
+
+    None
+}
+
+fn is_duplicate_main(diagnostic: &CompilerDiagnostic) -> bool {
+    matches!(
+        diagnostic.error(),
+        CompilerError::FunctionRedefined { name } if name.as_inner() == "main"
+    )
+}
+
+fn remap_imported_main_diagnostics(
+    diagnostics: &DiagnosticManager,
+    program: &parse::Program,
+    current_source: &CanonSourceFile,
+    dependencies: &DependencyMap,
+    unstable_features: &UnstableFeatures,
+) -> Vec<CompilerDiagnostic> {
+    if !diagnostics.diagnostics().iter().any(is_duplicate_main) {
+        return diagnostics.diagnostics().to_vec();
+    }
+
+    let Some(import_span) = imported_main_span(
+        program.items(),
+        current_source,
+        dependencies,
+        unstable_features,
+    ) else {
+        return diagnostics.diagnostics().to_vec();
+    };
+
+    diagnostics
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| {
+            if !is_duplicate_main(diagnostic) {
+                return diagnostic.clone();
+            }
+
+            let mut remapped = match diagnostic.severity() {
+                CompilerSeverity::Error => {
+                    CompilerDiagnostic::new(diagnostic.error().clone(), import_span)
+                }
+                CompilerSeverity::Warning => {
+                    CompilerDiagnostic::warning(diagnostic.error().clone(), import_span)
+                }
+            };
+            for label in diagnostic.secondary() {
+                remapped = remapped.with_secondary(label.span, label.message.clone());
+            }
+            for note in diagnostic.notes() {
+                remapped = remapped.with_note(note.clone());
+            }
+            if let Some(help) = diagnostic.help() {
+                remapped = remapped.with_help(help.clone());
+            }
+            remapped
+        })
+        .collect()
+}
+
 /// Parse and analyze a program using the [`simplicityhl`] compiler.
 /// Also create a [`Document`] when parsing succeeds.
 fn parse_program(
@@ -1035,8 +1219,12 @@ fn parse_program(
             return (diagnostics.diagnostics().to_vec(), Some(document));
         }
     };
+    let canonical_source: CanonSourceFile = source_file
+        .clone()
+        .try_into()
+        .expect("name was defined above");
     let compiler_diagnostics = match TemplateProgram::new_with_dep(
-        source_file.try_into().expect("name was defined above"),
+        canonical_source.clone(),
         &dependencies,
         &unstable_features,
         Box::new(ElementsJetHinter::new()),
@@ -1045,7 +1233,13 @@ fn parse_program(
             document.populate_visible_functions(&template_program);
             template_program.diagnostics().diagnostics().to_vec()
         }
-        Err(diagnostics) => diagnostics.diagnostics().to_vec(),
+        Err(diagnostics) => remap_imported_main_diagnostics(
+            &diagnostics,
+            &program,
+            &canonical_source,
+            &dependencies,
+            &unstable_features,
+        ),
     };
 
     (compiler_diagnostics, Some(document))
@@ -1193,6 +1387,82 @@ mod tests {
     }
 
     #[test]
+    fn function_selection_range_is_inside_its_document_symbol_range() {
+        let source = "/* 😀 */ fn main() {}";
+        let (temp, path) = in_temp_project(source);
+        let (errors, doc) = parse_program(
+            source,
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let doc = doc.expect("document");
+        let function = doc
+            .functions
+            .functions()
+            .into_iter()
+            .find(|function| function.name().as_inner() == "main")
+            .expect("main function");
+        let (start, end) = span_to_positions(function.span(), &doc.text).unwrap();
+        let full_range = Range::new(start, end);
+        let selection_range = doc.find_function_name_range(function).unwrap();
+
+        assert!(selection_range.start >= full_range.start);
+        assert!(selection_range.end <= full_range.end);
+        let name_start = source.find("main").expect("function name");
+        assert_eq!(
+            selection_range,
+            Range::new(
+                offset_to_position(name_start, &doc.text).unwrap(),
+                offset_to_position(name_start + "main".len(), &doc.text).unwrap(),
+            )
+        );
+    }
+
+    #[test]
+    fn stale_analysis_cannot_produce_an_out_of_bounds_selection_range() {
+        let source = "fn main() {}";
+        let (temp, path) = in_temp_project(source);
+        let (_, doc) = parse_program(
+            source,
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+        let mut doc = doc.expect("document");
+        let function = doc
+            .functions
+            .functions()
+            .into_iter()
+            .find(|function| function.name().as_inner() == "main")
+            .expect("main function")
+            .clone();
+
+        doc.text = Rope::from_str(&format!("// {}\n{source}", "x".repeat(100)));
+
+        assert!(doc.find_function_name_range(&function).is_err());
+    }
+
+    #[test]
+    fn looking_for_a_call_outside_a_function_is_an_empty_result() {
+        let source = "/* heading */\nfn main() {}";
+        let (temp, path) = in_temp_project(source);
+        let (errors, doc) = parse_program(
+            source,
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let doc = doc.expect("document");
+
+        assert!(doc
+            .find_related_call(simplicityhl::error::Span::new(0, 0..0))
+            .is_none());
+    }
+
+    #[test]
     #[ignore = "TODO we need to also create a file with a path so that could work"]
     fn test_parse_program_invalid_ast() {
         let (temp, path) = in_temp_project(invalid_program_on_ast());
@@ -1249,6 +1519,44 @@ mod tests {
             "expected the import to resolve, got {err:?}"
         );
         assert!(doc.is_some(), "expected a document");
+    }
+
+    #[test]
+    fn duplicate_imported_main_points_to_the_import() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        std::fs::write(root.join("Simplex.toml"), "").expect("write manifest");
+        std::fs::create_dir(root.join("simf")).expect("create source dir");
+        std::fs::write(
+            root.join("simf/library.simf"),
+            "pub fn helper() {}\nfn main() {}\n",
+        )
+        .expect("write imported module");
+
+        let import = "use crate::library::helper;";
+        let source = format!("{import}\nfn main() {{}}\n");
+        let path = root.join("simf/main.simf");
+        std::fs::write(&path, &source).expect("write entry file");
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (errors, _) = parse_program(&source, &path, &settings, &[root.to_path_buf()]);
+        let duplicate_main = errors
+            .iter()
+            .find(|error| {
+                matches!(
+                    error.error(),
+                    Error::FunctionRedefined { name } if name.as_inner() == "main"
+                )
+            })
+            .expect("duplicate main diagnostic");
+
+        let CompilerLocation::Code(span) = duplicate_main.location() else {
+            panic!("duplicate main should point to source code");
+        };
+        assert_eq!(span.to_slice(&source), Some(import));
     }
 
     #[test]

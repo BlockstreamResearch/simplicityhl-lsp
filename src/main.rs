@@ -5,6 +5,7 @@ mod completion;
 mod config;
 mod error;
 mod function;
+mod imports;
 mod project;
 mod utils;
 

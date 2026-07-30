@@ -10,7 +10,8 @@ Language Server for [SimplicityHL language](https://simplicity-lang.org/).
 
 ![diagnostics](assets/diagnostics.gif)
 
-- Completions of built-ins, jets and functions
+- Completions of built-ins, jets and functions, plus context-aware `use` paths and
+  public importable items
 
 ![completion](assets/completion.gif)
 
