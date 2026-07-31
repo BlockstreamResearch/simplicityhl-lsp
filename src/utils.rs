@@ -395,54 +395,70 @@ impl Document {
         &self,
         function: &parse::Function,
     ) -> Result<lsp_types::Range, LspError> {
-        let start_line = offset_to_position(function.span().start, &self.text)?.line;
-        let Some((line, character)) = self
-            .text
-            .lines()
-            .enumerate()
-            .skip(start_line as usize)
-            .find_map(|(i, line)| {
-                line.to_string()
-                    .find(function.name().as_inner())
-                    .map(|col| (i, col))
-            })
-        else {
+        let function_span = function.span();
+        let source = match function_span.file_id {
+            0 => &self.text,
+            file_id => {
+                &self
+                    .linearization_map
+                    .get(file_id)
+                    .ok_or_else(|| {
+                        LspError::FunctionNotFound(format!(
+                            "Source file for function {} not found",
+                            function.name()
+                        ))
+                    })?
+                    .text
+            }
+        };
+        let function_source = source
+            .get_byte_slice(function_span.start..function_span.end)
+            .ok_or_else(|| {
+                LspError::FunctionNotFound(format!(
+                    "Source span for function {} is outside its document",
+                    function.name()
+                ))
+            })?
+            .to_string();
+        let (tokens, _) = simplicityhl::lexer::lex(function_span.file_id, &function_source, 0);
+        let Some(tokens) = tokens else {
             return Err(LspError::FunctionNotFound(format!(
                 "Function with name {} not found",
                 function.name()
             )));
         };
+        let name_span = tokens
+            .windows(2)
+            .find_map(|pair| match pair {
+                [
+                    (simplicityhl::lexer::Token::Fn, _),
+                    (simplicityhl::lexer::Token::Ident(name), span),
+                ] if *name == function.name().as_inner() => Some(*span),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                LspError::FunctionNotFound(format!(
+                    "Function with name {} not found inside its source span",
+                    function.name()
+                ))
+            })?;
 
-        let func_size = u32::try_from(function.name().as_inner().len()).map_err(LspError::from)?;
-
-        let (line, character) = (
-            u32::try_from(line).map_err(LspError::from)?,
-            u32::try_from(character).map_err(LspError::from)?,
-        );
-
-        let (start, end) = (
-            lsp_types::Position { line, character },
-            lsp_types::Position {
-                line,
-                character: character + func_size,
-            },
-        );
-        Ok(lsp_types::Range { start, end })
+        Ok(lsp_types::Range {
+            start: offset_to_position(function_span.start + name_span.start, source)?,
+            end: offset_to_position(function_span.start + name_span.end, source)?,
+        })
     }
 
     /// Find [`simplicityhl::parse::Call`] which contains given [`simplicityhl::error::Span`], which also have minimal Span.
     pub fn find_related_call(
         &self,
         token_span: simplicityhl::error::Span,
-    ) -> Result<Option<&simplicityhl::parse::Call>, LspError> {
+    ) -> Option<&simplicityhl::parse::Call> {
         let func = self
             .functions
             .functions()
             .into_iter()
-            .find(|func| span_contains(func.span(), &token_span) && func.span().file_id == 0)
-            .ok_or(LspError::CallNotFound(
-                "Span of the call is not inside function.".into(),
-            ))?;
+            .find(|func| span_contains(func.span(), &token_span) && func.span().file_id == 0)?;
 
         let call = parse::ExprTree::Expression(func.body())
             .pre_order_iter()
@@ -458,7 +474,7 @@ impl Document {
             .map(|(call, _)| call)
             .last();
 
-        Ok(call)
+        call
     }
 
     /// Append functions imported via `use` declarations to [`Document`],

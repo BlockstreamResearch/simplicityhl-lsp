@@ -19,10 +19,6 @@ pub enum LspError {
     #[error("Function not found: {0}")]
     FunctionNotFound(String),
 
-    /// Failed to find call inside function.
-    #[error("Call not found: {0}")]
-    CallNotFound(String),
-
     /// A generic or unexpected internal error.
     #[error("Internal error: {0}")]
     Internal(String),
@@ -37,7 +33,8 @@ impl LspError {
         match self {
             LspError::ConversionFailed(_) => 1,
             LspError::FunctionNotFound(_) => 2,
-            LspError::CallNotFound(_) => 3,
+            // 3 was `CallNotFound`; no callable under the cursor is a normal empty result,
+            // rather than an RPC error.
             // 4 was `DocumentNotFound`; left unused so the remaining codes stay stable.
             LspError::IntegerConversionFailed(_) => 5,
             LspError::Internal(_) => 100,

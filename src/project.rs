@@ -216,27 +216,43 @@ impl ProjectContext {
             .map_or(self.source_root.as_path(), PathBuf::as_path)
     }
 
+    fn visible_mappings<'a>(
+        &'a self,
+        document_path: &Path,
+    ) -> impl Iterator<Item = &'a DependencyMapping> + 'a {
+        let canonical_document =
+            fs::canonicalize(document_path).unwrap_or_else(|_| document_path.to_path_buf());
+        self.dependencies
+            .iter()
+            .filter(move |mapping| canonical_document.starts_with(&mapping.context))
+    }
+
     /// Resolve the directory an import alias points at, from the perspective of
     /// `document_path`.
-    ///
-    /// The server itself hands whole mappings to the compiler via [`Self::dependency_map`]
-    /// and never resolves a single alias, so this is currently exercised only by the tests
-    /// below; import-path completion is its first real caller.
-    #[allow(dead_code)]
     pub fn import_root(&self, document_path: &Path, alias: &str) -> Option<&Path> {
         if alias == "crate" {
             return Some(self.package_root_for(document_path));
         }
 
-        let canonical_document =
-            fs::canonicalize(document_path).unwrap_or_else(|_| document_path.to_path_buf());
-        self.dependencies
-            .iter()
-            .filter(|mapping| {
-                mapping.alias == alias && canonical_document.starts_with(&mapping.context)
-            })
+        self.visible_mappings(document_path)
+            .filter(|mapping| mapping.alias == alias)
             .max_by_key(|mapping| mapping.context.as_os_str().len())
             .map(|mapping| mapping.target.as_path())
+    }
+
+    /// Return dependency aliases that are visible from `document_path`.
+    ///
+    /// A package can provide both a broad mapping and a more specific override for the
+    /// same alias. Completion only needs to display that logical alias once; [`Self::import_root`]
+    /// selects the effective target when the user continues the path.
+    pub fn dependency_aliases(&self, document_path: &Path) -> Vec<&str> {
+        let mut aliases = self
+            .visible_mappings(document_path)
+            .map(|mapping| mapping.alias.as_str())
+            .collect::<Vec<_>>();
+        aliases.sort_unstable();
+        aliases.dedup();
+        aliases
     }
 }
 
@@ -484,6 +500,14 @@ mod tests {
                     .unwrap()
                     .as_path()
             )
+        );
+        assert_eq!(
+            context.dependency_aliases(&root.join("contracts/main.simf")),
+            vec!["merkle"]
+        );
+        assert_eq!(
+            context.dependency_aliases(&root.join("vendor/merkle/simf/root.simf")),
+            vec!["math"]
         );
     }
 
