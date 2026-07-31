@@ -110,6 +110,13 @@ pub struct Document {
     /// Functions defined in file and imported modules.
     pub functions: Functions,
 
+    /// `use` declarations written in this document.
+    ///
+    /// The compiler's resolved function table is keyed by the local import name, while
+    /// navigation requests carry only a source position. Keeping the declarations lets us
+    /// bridge those two representations without reparsing on every request.
+    pub use_declarations: Vec<parse::UseDecl>,
+
     /// Mapping from module id to its Uri.
     pub linearization_map: Vec<SourceFile>,
 
@@ -766,6 +773,18 @@ impl LanguageServer for Backend {
         let token_position = params.text_document_position_params.position;
         let token_span = position_to_span(token_position, &doc.text)?;
 
+        if let Some(function) = doc.find_imported_function(token_span) {
+            let Some(source_file) = doc.linearization_map.get(function.span().file_id) else {
+                return Ok(None);
+            };
+            let (start, end) = span_to_positions(function.as_ref(), &source_file.text)?;
+
+            return Ok(Some(GotoDefinitionResponse::from(Location::new(
+                source_file.uri.clone(),
+                Range::new(start, end),
+            ))));
+        }
+
         let Some(call) = doc.find_related_call(token_span) else {
             let Some(func) = functions
                 .iter()
@@ -952,6 +971,7 @@ impl Backend {
         // available so completion still works while the user is typing incomplete syntax.
         let mut document = document.unwrap_or_else(|| Document {
             functions: Functions::new(),
+            use_declarations: Vec::new(),
             linearization_map: Vec::new(),
             text: rope.clone(),
             version,
@@ -961,8 +981,9 @@ impl Backend {
         let diagnostics = err
             .iter()
             .filter_map(|err| {
-                // HACK: We ignoring MainRequired error because right now we cannot parse file as a
-                // library
+                // Library analysis normally injects a synthetic entry point. Keep entry-point
+                // diagnostics hidden as a defensive fallback so opening a library or an invalidly
+                // nested `main` does not produce editor noise unrelated to the file's definitions.
                 match err.error() {
                     simplicityhl::error::Error::MainRequired => return None,
                     simplicityhl::error::Error::CannotParse { msg }
@@ -1019,13 +1040,20 @@ impl Backend {
 }
 
 /// Create [`Document`] using parsed program and code.
-fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Document {
+fn create_document(program: &simplicityhl::parse::Program, text: &str, path: &Path) -> Document {
+    let text = Rope::from_str(text);
     let mut document = Document {
         functions: Functions::new(),
-        text: Rope::from_str(text),
-        linearization_map: Vec::new(),
+        use_declarations: Vec::new(),
+        linearization_map: vec![SourceFile {
+            uri: Uri::from_file_path(path).expect("source path produces a valid file URI"),
+            text: text.clone(),
+        }],
+        text,
         version: None,
     };
+
+    collect_use_declarations(program.items(), &mut document.use_declarations);
 
     program
         .items()
@@ -1049,6 +1077,21 @@ fn create_document(program: &simplicityhl::parse::Program, text: &str) -> Docume
         });
 
     document
+}
+
+fn collect_use_declarations(items: &[parse::Item], declarations: &mut Vec<parse::UseDecl>) {
+    for item in items {
+        match item {
+            parse::Item::Use(use_decl) => declarations.push(use_decl.clone()),
+            parse::Item::Module(module) => {
+                collect_use_declarations(module.items(), declarations);
+            }
+            parse::Item::TypeAlias(_)
+            | parse::Item::Function(_)
+            | parse::Item::EnumDeclaration(_)
+            | parse::Item::Ignored => {}
+        }
+    }
 }
 
 fn items_contain_main(items: &[parse::Item]) -> bool {
@@ -1200,7 +1243,7 @@ fn parse_program(
         return (diagnostics.diagnostics().to_vec(), None);
     };
 
-    let mut document = create_document(&program, text.as_ref());
+    let mut document = create_document(&program, text.as_ref(), path);
 
     // Import roots come from the Simplex manifest and the client's settings rather than
     // from the containing directory, so dependencies resolve the way `simplex` builds them.
@@ -1223,8 +1266,21 @@ fn parse_program(
         .clone()
         .try_into()
         .expect("name was defined above");
+
+    // FIXME: The compiler analyzes programs from an entry-file perspective and rejects a library file
+    // that has no `main`. Editors open those files directly, though, and still need the resolved
+    // import graph for navigation. A synthetic entry point lets analysis build that graph while
+    // leaving every span in the user's source unchanged. It is never added to `Document`.
+    let analysis_source = if items_contain_main(program.items()) {
+        canonical_source.clone()
+    } else {
+        CanonSourceFile::new(
+            canonical_source.name().clone(),
+            Arc::from(format!("{}\nfn main() {{}}\n", canonical_source.content())),
+        )
+    };
     let compiler_diagnostics = match TemplateProgram::new_with_dep(
-        canonical_source.clone(),
+        analysis_source,
         &dependencies,
         &unstable_features,
         Box::new(ElementsJetHinter::new()),
@@ -1353,6 +1409,127 @@ mod tests {
         assert!(err.is_empty(), "Expected no parsing error, got {err:?}");
         let doc = doc.expect("Expected Some(Document)");
         assert_eq!(doc.functions.map.len(), 2);
+    }
+
+    #[test]
+    fn library_file_without_main_keeps_definition_metadata() {
+        let source = "fn helper() {}\nfn caller() { helper() }\n";
+        let (temp, path) = in_temp_project(source);
+        let (errors, doc) = parse_program(
+            source,
+            &path,
+            &Settings::default(),
+            &[temp.path().to_path_buf()],
+        );
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let doc = doc.expect("library document");
+        let call_start = source.rfind("helper").expect("helper call");
+        let call = doc
+            .find_related_call(Span::new(0, call_start + 1..call_start + 1))
+            .expect("helper call should remain navigable");
+        let function = doc
+            .functions
+            .get_func(call.name().to_string().as_str())
+            .expect("helper definition");
+        let source_file = doc
+            .linearization_map
+            .get(function.span().file_id)
+            .expect("current file should always have source metadata");
+
+        assert_eq!(function.name().as_inner(), "helper");
+        assert_eq!(function.span().file_id, 0);
+        assert_eq!(
+            source_file.uri,
+            Uri::from_file_path(std::fs::canonicalize(&path).expect("canonical path"))
+                .expect("file URI")
+        );
+    }
+
+    #[test]
+    fn nested_main_does_not_conflict_with_a_synthetic_entry_point() {
+        let source = "mod nested { fn main() {} }\n";
+        let (temp, path) = in_temp_project(source);
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (errors, doc) = parse_program(source, &path, &settings, &[temp.path().to_path_buf()]);
+
+        assert!(
+            doc.is_some(),
+            "the source should remain available to the LSP"
+        );
+        assert!(
+            !errors.iter().any(|diagnostic| {
+                matches!(
+                    diagnostic.error(),
+                    Error::FunctionRedefined { name } if name.as_inner() == "main"
+                )
+            }),
+            "a nested main must not collide with an injected main: {errors:?}"
+        );
+        let expected = Error::MainOutOfEntryFile.to_string();
+        assert!(
+            errors.iter().any(|diagnostic| {
+                matches!(diagnostic.error(), Error::CannotParse { msg } if msg == &expected)
+            }),
+            "the compiler should still report that main is outside the entry scope: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn use_items_and_aliases_resolve_to_the_imported_definition() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        std::fs::write(root.join("Simplex.toml"), "").expect("write manifest");
+        std::fs::create_dir(root.join("simf")).expect("create source dir");
+        let dependency_path = root.join("simf/math.simf");
+        std::fs::write(&dependency_path, "pub fn add() {}\npub fn subtract() {}\n")
+            .expect("write module");
+        let source =
+            "use crate::math::{add as plus, subtract};\nfn main() { plus(); subtract() }\n";
+        let path = root.join("simf/main.simf");
+        std::fs::write(&path, source).expect("write entry file");
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (errors, doc) = parse_program(source, &path, &settings, &[root.to_path_buf()]);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let doc = doc.expect("document");
+        let imported_at = |needle: &str| {
+            let start = source.find(needle).expect("import token");
+            doc.find_imported_function(Span::new(0, start + 1..start + 1))
+                .expect("imported function")
+        };
+
+        let original = imported_at("add as");
+        let alias = imported_at("plus,");
+        let grouped_item = imported_at("subtract}");
+        assert_eq!(original.name().as_inner(), "add");
+        assert_eq!(alias.name().as_inner(), "add");
+        assert_eq!(grouped_item.name().as_inner(), "subtract");
+        assert!(doc
+            .find_imported_function(Span::new(
+                0,
+                source.find("math").unwrap() + 1..source.find("math").unwrap() + 1,
+            ))
+            .is_none());
+
+        let source_file = doc
+            .linearization_map
+            .get(original.span().file_id)
+            .expect("imported source metadata");
+        assert_eq!(
+            source_file.uri,
+            Uri::from_file_path(
+                std::fs::canonicalize(&dependency_path).expect("canonical dependency path"),
+            )
+            .expect("file URI")
+        );
     }
 
     #[test]

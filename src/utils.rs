@@ -449,6 +449,67 @@ impl Document {
         })
     }
 
+    /// Resolve the imported function named by a cursor inside a `use` declaration.
+    ///
+    /// `UseDecl` stores names but not an individual span for each path/item segment. The lexer
+    /// supplies those spans; the declaration supplies the semantic split between path segments,
+    /// imported names, and aliases. Combining them prevents a path component that happens to have
+    /// the same spelling as a function from being treated as the imported item.
+    pub fn find_imported_function(
+        &self,
+        token_span: simplicityhl::error::Span,
+    ) -> Option<&parse::Function> {
+        let use_decl = self
+            .use_declarations
+            .iter()
+            .filter(|use_decl| span_contains(use_decl.span(), &token_span))
+            .min_by_key(|use_decl| use_decl.span().end - use_decl.span().start)?;
+
+        let source = self.text.to_string();
+        let (tokens, _) = simplicityhl::lexer::lex(0, &source, 0);
+        let tokens = tokens?;
+        let identifiers = tokens
+            .iter()
+            .filter(|(_, span)| {
+                span.start >= use_decl.span().start && span.end <= use_decl.span().end
+            })
+            .skip_while(|(token, _)| !matches!(token, simplicityhl::lexer::Token::Use))
+            .skip(1)
+            .filter(|(token, _)| {
+                matches!(
+                    token,
+                    simplicityhl::lexer::Token::Crate | simplicityhl::lexer::Token::Ident(_)
+                )
+            })
+            .collect::<Vec<_>>();
+        let selected_index = identifiers
+            .iter()
+            .position(|(_, span)| span_contains(span, &token_span))?;
+
+        // All identifiers before this boundary belong to the module path. The remainder is
+        // `(original, optional alias)` for each imported item, in source order.
+        let mut item_index = use_decl.path().len();
+        let items = match use_decl.items() {
+            parse::UseItems::Single(item) => std::slice::from_ref(item),
+            parse::UseItems::List(items) => items.as_slice(),
+        };
+        for (original, alias) in items {
+            let selected_original = selected_index == item_index;
+            item_index += 1;
+            let selected_alias = alias.is_some() && selected_index == item_index;
+            if alias.is_some() {
+                item_index += 1;
+            }
+
+            if selected_original || selected_alias {
+                let local_name = alias.as_ref().unwrap_or(original);
+                return self.functions.get_func(local_name.as_inner());
+            }
+        }
+
+        None
+    }
+
     /// Find [`simplicityhl::parse::Call`] which contains given [`simplicityhl::error::Span`], which also have minimal Span.
     pub fn find_related_call(
         &self,
