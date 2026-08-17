@@ -567,28 +567,6 @@ impl Document {
 
         let resolved_program = template_program.resolved_program();
 
-        // Build global function lookup: (name, file_id) -> Function.
-        let mut global_defs: std::collections::HashMap<(&str, usize), &parse::Function> =
-            std::collections::HashMap::new();
-        for item in resolved_program.items() {
-            let parse::Item::Module(module) = item else {
-                continue;
-            };
-            let Some(file_id) = module
-                .name()
-                .as_inner()
-                .strip_prefix("unit_")
-                .and_then(|s| s.parse::<usize>().ok())
-            else {
-                continue;
-            };
-            for inner_item in module.items() {
-                if let parse::Item::Function(func) = inner_item {
-                    global_defs.insert((func.name().as_inner(), file_id), func);
-                }
-            }
-        }
-
         for item in resolved_program.items() {
             let parse::Item::Module(module) = item else {
                 continue;
@@ -619,24 +597,25 @@ impl Document {
                     continue;
                 };
 
-                if target_file_id == 0 {
-                    continue;
-                }
-
                 let items = match use_decl.items() {
                     parse::UseItems::Single(elem) => std::slice::from_ref(elem),
                     parse::UseItems::List(elems) => elems.as_slice(),
                 };
 
-                let Some(source_file) = self.linearization_map.get(target_file_id) else {
-                    continue;
-                };
-
                 for (original_name, alias) in items {
                     let local_name = alias.as_ref().unwrap_or(original_name);
+                    let mut visited = std::collections::HashSet::new();
+                    let Some(func) = resolve_function(
+                        resolved_program,
+                        target_file_id,
+                        &path[2..],
+                        original_name.as_inner(),
+                        &mut visited,
+                    ) else {
+                        continue;
+                    };
 
-                    let Some(func) = global_defs.get(&(original_name.as_inner(), target_file_id))
-                    else {
+                    let Some(source_file) = self.linearization_map.get(func.span().file_id) else {
                         continue;
                     };
 
@@ -651,6 +630,96 @@ impl Document {
             }
         }
     }
+}
+
+type ResolutionKey = (usize, Vec<String>, String);
+
+fn resolve_function<'a>(
+    program: &'a parse::Program,
+    file_id: usize,
+    module_path: &[simplicityhl::str::Identifier],
+    name: &str,
+    visited: &mut std::collections::HashSet<ResolutionKey>,
+) -> Option<&'a parse::Function> {
+    let key = (
+        file_id,
+        module_path
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        name.to_string(),
+    );
+    if !visited.insert(key) {
+        return None;
+    }
+
+    let items = module_items(program, file_id, module_path)?;
+    if let Some(function) = items.iter().find_map(|item| match item {
+        parse::Item::Function(function) if function.name().as_inner() == name => Some(function),
+        _ => None,
+    }) {
+        return Some(function);
+    }
+
+    for use_decl in items.iter().filter_map(|item| match item {
+        parse::Item::Use(use_decl) => Some(use_decl),
+        _ => None,
+    }) {
+        let imported_items = match use_decl.items() {
+            parse::UseItems::Single(item) => std::slice::from_ref(item),
+            parse::UseItems::List(items) => items.as_slice(),
+        };
+        for (original, alias) in imported_items {
+            let local_name = alias.as_ref().unwrap_or(original);
+            if local_name.as_inner() != name {
+                continue;
+            }
+
+            let path = use_decl.path();
+            let target_file_id = path
+                .get(1)?
+                .as_inner()
+                .strip_prefix("unit_")?
+                .parse::<usize>()
+                .ok()?;
+            if let Some(function) = resolve_function(
+                program,
+                target_file_id,
+                &path[2..],
+                original.as_inner(),
+                visited,
+            ) {
+                return Some(function);
+            }
+        }
+    }
+
+    None
+}
+
+fn module_items<'a>(
+    program: &'a parse::Program,
+    file_id: usize,
+    module_path: &[simplicityhl::str::Identifier],
+) -> Option<&'a [parse::Item]> {
+    let unit_name = format!("unit_{file_id}");
+    let unit = program.items().iter().find_map(|item| match item {
+        parse::Item::Module(module) if module.name().as_inner() == unit_name => Some(module),
+        _ => None,
+    })?;
+    let mut items = unit.items();
+
+    for segment in module_path {
+        let module = items.iter().find_map(|item| match item {
+            parse::Item::Module(module) if module.name().as_inner() == segment.as_inner() => {
+                Some(module)
+            }
+            _ => None,
+        })?;
+        items = module.items();
+    }
+
+    Some(items)
 }
 
 #[cfg(test)]

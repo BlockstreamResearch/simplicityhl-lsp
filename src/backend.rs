@@ -130,6 +130,21 @@ pub struct Document {
     pub version: Option<i32>,
 }
 
+impl Document {
+    fn new(uri: Uri, text: Rope, version: Option<i32>) -> Self {
+        Self {
+            functions: Functions::new(),
+            use_declarations: Vec::new(),
+            linearization_map: vec![SourceFile {
+                uri,
+                text: text.clone(),
+            }],
+            text,
+            version,
+        }
+    }
+}
+
 /// Client-supplied configuration, kept separate from the document cache so a
 /// settings change does not need the document lock.
 #[derive(Debug, Default)]
@@ -969,13 +984,8 @@ impl Backend {
 
         // A parse failure invalidates every old analysis span, but the latest text must remain
         // available so completion still works while the user is typing incomplete syntax.
-        let mut document = document.unwrap_or_else(|| Document {
-            functions: Functions::new(),
-            use_declarations: Vec::new(),
-            linearization_map: Vec::new(),
-            text: rope.clone(),
-            version,
-        });
+        let mut document =
+            document.unwrap_or_else(|| Document::new(params.uri.clone(), rope.clone(), version));
         document.version = version;
         documents.insert(params.uri.clone(), document);
         let diagnostics = err
@@ -1039,44 +1049,38 @@ impl Backend {
     }
 }
 
-/// Create [`Document`] using parsed program and code.
-fn create_document(program: &simplicityhl::parse::Program, text: &str, path: &Path) -> Document {
-    let text = Rope::from_str(text);
-    let mut document = Document {
-        functions: Functions::new(),
-        use_declarations: Vec::new(),
-        linearization_map: vec![SourceFile {
-            uri: Uri::from_file_path(path).expect("source path produces a valid file URI"),
-            text: text.clone(),
-        }],
-        text,
-        version: None,
-    };
+impl Document {
+    /// Create a document from a successfully parsed program and its source.
+    fn from_program(program: &simplicityhl::parse::Program, text: &str, path: &Path) -> Self {
+        let text = Rope::from_str(text);
+        let uri = Uri::from_file_path(path).expect("source path produces a valid file URI");
+        let mut document = Self::new(uri, text, None);
 
-    collect_use_declarations(program.items(), &mut document.use_declarations);
+        collect_use_declarations(program.items(), &mut document.use_declarations);
 
-    program
-        .items()
-        .iter()
-        .filter_map(|item| {
-            if let parse::Item::Function(func) = item {
-                Some(func)
-            } else {
-                None
-            }
-        })
-        .for_each(|func| {
-            let start_line = offset_to_position(func.span().start, &document.text)
-                .unwrap_or_default()
-                .line;
-            document.functions.insert(
-                func.name().to_string(),
-                func.to_owned(),
-                get_comments_from_lines(start_line, &document.text),
-            );
-        });
+        program
+            .items()
+            .iter()
+            .filter_map(|item| {
+                if let parse::Item::Function(func) = item {
+                    Some(func)
+                } else {
+                    None
+                }
+            })
+            .for_each(|func| {
+                let start_line = offset_to_position(func.span().start, &document.text)
+                    .unwrap_or_default()
+                    .line;
+                document.functions.insert(
+                    func.name().to_string(),
+                    func.to_owned(),
+                    get_comments_from_lines(start_line, &document.text),
+                );
+            });
 
-    document
+        document
+    }
 }
 
 fn collect_use_declarations(items: &[parse::Item], declarations: &mut Vec<parse::UseDecl>) {
@@ -1243,7 +1247,7 @@ fn parse_program(
         return (diagnostics.diagnostics().to_vec(), None);
     };
 
-    let mut document = create_document(&program, text.as_ref(), path);
+    let mut document = Document::from_program(&program, text.as_ref(), path);
 
     // Import roots come from the Simplex manifest and the client's settings rather than
     // from the containing directory, so dependencies resolve the way `simplex` builds them.
@@ -1530,6 +1534,77 @@ mod tests {
             )
             .expect("file URI")
         );
+    }
+
+    #[test]
+    fn nested_and_transitive_reexports_resolve_to_original_definitions() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        let write = |path: PathBuf, source: &str| {
+            std::fs::create_dir_all(path.parent().expect("has parent")).expect("create dir");
+            std::fs::write(path, source).expect("write file");
+        };
+
+        write(
+            root.join("Simplex.toml"),
+            "[dependencies]\nmerkle = { path = 'deps/merkle' }\nfacade = { path = 'deps/facade' }\n",
+        );
+        write(root.join("deps/merkle/Simplex.toml"), "");
+        let merkle_path = root.join("deps/merkle/simf/build_root.simf");
+        write(
+            merkle_path.clone(),
+            "pub mod wrapper {\n    pub fn get_root() {}\n    pub fn hash() {}\n}\npub use crate::wrapper::{get_root, hash};\n",
+        );
+        write(
+            root.join("deps/facade/Simplex.toml"),
+            "[dependencies]\nleaf = { path = '../leaf' }\n",
+        );
+        write(
+            root.join("deps/facade/simf/smth.simf"),
+            "pub use leaf::ops::hash;\n",
+        );
+        write(root.join("deps/leaf/Simplex.toml"), "");
+        let leaf_path = root.join("deps/leaf/simf/ops.simf");
+        write(leaf_path.clone(), "pub fn hash() {}\n");
+
+        let source = "use merkle::build_root::{get_root, hash as and_hash};\nuse facade::smth::hash as or_hash;\nfn main() { get_root(); and_hash(); or_hash(); }\n";
+        let path = root.join("simf/main.simf");
+        write(path.clone(), source);
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (errors, doc) = parse_program(source, &path, &settings, &[root.to_path_buf()]);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let doc = doc.expect("document");
+        let imported_at = |offset: usize| {
+            doc.find_imported_function(Span::new(0, offset + 1..offset + 1))
+                .expect("imported function")
+        };
+
+        let nested = imported_at(source.find("get_root").expect("nested import"));
+        let nested_alias = imported_at(source.find("and_hash").expect("nested alias"));
+        let transitive = imported_at(source.rfind("hash as").expect("transitive import"));
+        let transitive_alias = imported_at(source.find("or_hash").expect("transitive alias"));
+
+        assert_eq!(nested.name().as_inner(), "get_root");
+        assert_eq!(nested_alias.name().as_inner(), "hash");
+        assert_eq!(transitive.name().as_inner(), "hash");
+        assert_eq!(transitive_alias.name().as_inner(), "hash");
+
+        let definition_uri =
+            |function: &parse::Function| &doc.linearization_map[function.span().file_id].uri;
+        let merkle_uri =
+            Uri::from_file_path(std::fs::canonicalize(merkle_path).expect("canonical merkle path"))
+                .expect("merkle URI");
+        let leaf_uri =
+            Uri::from_file_path(std::fs::canonicalize(leaf_path).expect("canonical leaf path"))
+                .expect("leaf URI");
+        assert_eq!(definition_uri(nested), &merkle_uri);
+        assert_eq!(definition_uri(nested_alias), &merkle_uri);
+        assert_eq!(definition_uri(transitive), &leaf_uri);
+        assert_eq!(definition_uri(transitive_alias), &leaf_uri);
     }
 
     #[test]
