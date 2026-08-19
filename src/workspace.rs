@@ -327,6 +327,10 @@ mod tests {
         Uri::from_file_path(std::fs::canonicalize(path).expect("canonical path")).expect("file URI")
     }
 
+    fn temporary_uri(name: &str) -> Uri {
+        Uri::from_file_path(std::env::temp_dir().join(name)).expect("temporary file URI")
+    }
+
     fn insert_analysis(state: &mut WorkspaceState, source: &str, path: &Path, root: &Path) -> Uri {
         let uri = canonical_uri(path);
         state.replace_inner(&uri, analyze(source, path, root), Some(1));
@@ -538,7 +542,7 @@ mod tests {
 
     #[test]
     fn older_change_is_rejected_before_analysis() {
-        let uri = Uri::from_file_path("/tmp/change-order.simf").expect("file URI");
+        let uri = temporary_uri("change-order.simf");
         let mut state = WorkspaceState::default();
         state.begin_open(&uri, "fn initial() {}\n", Some(1));
         state
@@ -627,7 +631,7 @@ mod tests {
 
     #[test]
     fn save_ticket_keeps_the_last_known_version() {
-        let uri = Uri::from_file_path("/tmp/save-ticket.simf").expect("file URI");
+        let uri = temporary_uri("save-ticket.simf");
         let mut state = WorkspaceState::default();
         state.begin_open(&uri, "fn main() {}\n", Some(7));
 
@@ -640,7 +644,7 @@ mod tests {
 
     #[test]
     fn closing_document_releases_its_buffer_payload() {
-        let uri = Uri::from_file_path("/tmp/closed-buffer.simf").expect("file URI");
+        let uri = temporary_uri("closed-buffer.simf");
         let mut state = WorkspaceState::default();
         state.begin_open(&uri, "fn main() {}\n", Some(3));
 
@@ -652,7 +656,7 @@ mod tests {
         assert_eq!(document.version, None);
         assert!(state.begin_close(&uri).is_none());
 
-        let unknown = Uri::from_file_path("/tmp/unknown-close.simf").expect("file URI");
+        let unknown = temporary_uri("unknown-close.simf");
         assert!(state.begin_close(&unknown).is_none());
         assert!(!state.documents.contains_key(&unknown));
     }

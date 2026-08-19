@@ -1067,7 +1067,8 @@ mod tests {
             &mut diagnostics,
         )
         .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
-        AnalysisSnapshot::from_program(&program, source, Path::new("/tmp/semantic_tokens.simf"))
+        let path = std::env::temp_dir().join("semantic_tokens.simf");
+        AnalysisSnapshot::from_program(&program, source, &path)
     }
 
     #[tokio::test]

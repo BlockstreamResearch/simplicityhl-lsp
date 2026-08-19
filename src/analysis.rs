@@ -627,11 +627,8 @@ mod tests {
             &mut diagnostics,
         )
         .expect("valid program");
-        let mut snapshot = AnalysisSnapshot::from_program(
-            &program,
-            source,
-            Path::new("/tmp/module-scope-test.simf"),
-        );
+        let path = std::env::temp_dir().join("module-scope-test.simf");
+        let mut snapshot = AnalysisSnapshot::from_program(&program, source, &path);
         let owner = snapshot
             .functions
             .get_func("owner")
