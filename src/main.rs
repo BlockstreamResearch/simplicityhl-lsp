@@ -1,13 +1,18 @@
 #![warn(clippy::all, clippy::pedantic)]
 
+mod analysis;
 mod backend;
 mod completion;
 mod config;
+mod diagnostics;
 mod error;
 mod function;
 mod imports;
+mod navigation;
 mod project;
+mod semantic_tokens;
 mod utils;
+mod workspace;
 
 use backend::Backend;
 use tower_lsp_server::{LspService, Server};

@@ -1,61 +1,43 @@
-use ropey::Rope;
 use serde_json::Value;
-use simplicityhl::ast::ElementsJetHinter;
-use simplicityhl::parse::ParseFromStrWithErrors;
-use simplicityhl::TemplateProgram;
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
     CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, Diagnostic,
-    DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWatchedFilesRegistrationOptions,
-    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    ExecuteCommandParams, FileSystemWatcher, GlobPattern, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind, MessageType, OneOf,
-    Range, ReferenceParams, Registration, SaveOptions, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SemanticTokens, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, SymbolKind, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions,
-    WorkspaceFoldersServerCapabilities, WorkspaceServerCapabilities,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
+    FileSystemWatcher, GlobPattern, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    Location, MarkupContent, MarkupKind, MessageType, OneOf, Range, ReferenceParams, Registration,
+    SaveOptions, SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions,
+    SemanticTokensParams, SemanticTokensResult, SemanticTokensServerCapabilities,
+    ServerCapabilities, SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SymbolKind,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
+    TextDocumentSyncSaveOptions, Uri, WorkDoneProgressOptions, WorkspaceFoldersServerCapabilities,
+    WorkspaceServerCapabilities,
 };
 use tower_lsp_server::{Client, LanguageServer, UriExt};
 
-use miniscript::iter::TreeLike;
-use simplicityhl::error::{
-    Diagnostic as CompilerDiagnostic, DiagnosticManager, Error as CompilerError,
-    Location as CompilerLocation, Severity as CompilerSeverity, Span,
-};
-use simplicityhl::resolution::DependencyMap;
-use simplicityhl::source::CanonSourceFile;
-use simplicityhl::{parse, UnstableFeatures};
+use simplicityhl::parse;
 
+use crate::analysis::AnalysisSnapshot;
 use crate::completion::{self, CompletionProvider};
 use crate::config::Settings;
 use crate::error::LspError;
-use crate::function::Functions;
 use crate::imports::{self, ImportCompletionContext};
 use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::utils::{
     create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
-    get_call_span, get_comments_from_lines, offset_to_position, position_to_offset,
-    position_to_span, span_contains, span_to_positions,
+    get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
 };
-
-/// Semantic token type indices - must match the legend order
-mod semantic_token_types {
-    pub const FUNCTION: u32 = 0;
-    pub const NAMESPACE: u32 = 5;
-}
+use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
 /// Collect the workspace folders the client opened with, falling back to the
 /// deprecated `root_uri` for clients that do not send folders.
@@ -81,70 +63,6 @@ fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
     roots
 }
 
-/// Get the semantic token legend for this server
-fn get_semantic_token_legend() -> SemanticTokensLegend {
-    SemanticTokensLegend {
-        token_types: vec![
-            SemanticTokenType::FUNCTION,
-            SemanticTokenType::PARAMETER,
-            SemanticTokenType::VARIABLE,
-            SemanticTokenType::TYPE,
-            SemanticTokenType::KEYWORD,
-            SemanticTokenType::NAMESPACE,
-        ],
-        token_modifiers: vec![
-            SemanticTokenModifier::DECLARATION,
-            SemanticTokenModifier::DEFINITION,
-        ],
-    }
-}
-
-#[derive(Debug)]
-pub struct SourceFile {
-    pub uri: Uri,
-    pub text: Rope,
-}
-
-#[derive(Debug)]
-pub struct Document {
-    /// Functions defined in file and imported modules.
-    pub functions: Functions,
-
-    /// `use` declarations written in this document.
-    ///
-    /// The compiler's resolved function table is keyed by the local import name, while
-    /// navigation requests carry only a source position. Keeping the declarations lets us
-    /// bridge those two representations without reparsing on every request.
-    pub use_declarations: Vec<parse::UseDecl>,
-
-    /// Mapping from module id to its Uri.
-    pub linearization_map: Vec<SourceFile>,
-
-    /// Source of given document.
-    pub text: Rope,
-
-    /// Version of the text this document was built from, when the client supplied one.
-    ///
-    /// Notifications are served concurrently and complete out of order, so a slow
-    /// analysis must not overwrite the result of a newer edit.
-    pub version: Option<i32>,
-}
-
-impl Document {
-    fn new(uri: Uri, text: Rope, version: Option<i32>) -> Self {
-        Self {
-            functions: Functions::new(),
-            use_declarations: Vec::new(),
-            linearization_map: vec![SourceFile {
-                uri,
-                text: text.clone(),
-            }],
-            text,
-            version,
-        }
-    }
-}
-
 /// Client-supplied configuration, kept separate from the document cache so a
 /// settings change does not need the document lock.
 #[derive(Debug, Default)]
@@ -158,21 +76,41 @@ struct ServerConfig {
     watched_files_registration: bool,
 }
 
+#[derive(Debug, Default)]
+struct DiagnosticTransaction {
+    gate: Mutex<()>,
+}
+
+impl DiagnosticTransaction {
+    async fn run<F, P, Fut>(&self, workspace: &RwLock<WorkspaceState>, transition: F, publish: P)
+    where
+        F: FnOnce(&mut WorkspaceState) -> Option<Vec<DiagnosticUpdate>>,
+        P: FnOnce(Vec<DiagnosticUpdate>) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let _transaction = self.gate.lock().await;
+        let updates = {
+            let mut workspace = workspace.write().await;
+            transition(&mut workspace)
+        };
+        if let Some(updates) = updates {
+            publish(updates).await;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Backend {
     client: Client,
 
-    document_map: Arc<RwLock<HashMap<Uri, Document>>>,
+    workspace: Arc<RwLock<WorkspaceState>>,
+
+    /// Serializes each workspace diagnostic transition with its complete publication batch.
+    diagnostic_transaction: DiagnosticTransaction,
 
     config: Arc<RwLock<ServerConfig>>,
 
     completion_provider: CompletionProvider,
-}
-
-struct TextDocumentItem<'a> {
-    uri: Uri,
-    text: &'a str,
-    version: Option<i32>,
 }
 
 impl LanguageServer for Backend {
@@ -244,7 +182,7 @@ impl LanguageServer for Backend {
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
                         SemanticTokensOptions {
                             work_done_progress_options: WorkDoneProgressOptions::default(),
-                            legend: get_semantic_token_legend(),
+                            legend: crate::semantic_tokens::legend(),
                             range: Some(false),
                             full: Some(SemanticTokensFullOptions::Bool(true)),
                         },
@@ -347,12 +285,15 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        self.on_change(TextDocumentItem {
-            uri: params.text_document.uri,
-            text: &params.text_document.text,
-            version: Some(params.text_document.version),
-        })
-        .await;
+        if params.text_document.uri.to_file_path().is_none() {
+            return;
+        }
+        let input = self.workspace.write().await.begin_open(
+            &params.text_document.uri,
+            &params.text_document.text,
+            Some(params.text_document.version),
+        );
+        self.on_change(input).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -362,31 +303,39 @@ impl LanguageServer for Backend {
         let Some(change) = params.content_changes.into_iter().next_back() else {
             return;
         };
-        self.on_change(TextDocumentItem {
-            text: &change.text,
-            uri: params.text_document.uri,
-            version: Some(params.text_document.version),
-        })
-        .await;
+        let Some(input) = self.workspace.write().await.begin_change(
+            &params.text_document.uri,
+            &change.text,
+            Some(params.text_document.version),
+        ) else {
+            return;
+        };
+        self.on_change(input).await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         if let Some(text) = params.text {
-            self.on_change(TextDocumentItem {
-                uri: params.text_document.uri,
-                text: &text,
-                version: None,
-            })
-            .await;
+            let Some(input) =
+                self.workspace
+                    .write()
+                    .await
+                    .begin_change(&params.text_document.uri, &text, None)
+            else {
+                return;
+            };
+            self.on_change(input).await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
+        let Some(generation) = self.workspace.write().await.begin_close(&uri) else {
+            return;
+        };
         // Without this the parsed document is retained for the rest of the session and the
         // editor keeps showing the diagnostics published for a file that is no longer open.
-        self.document_map.write().await.remove(&uri);
-        self.client.publish_diagnostics(uri, Vec::new(), None).await;
+        self.run_diagnostic_transaction(|workspace| workspace.remove_if_current(&uri, generation))
+            .await;
     }
 
     async fn semantic_tokens_full(
@@ -403,119 +352,16 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
 
         // Return None if document not found (e.g., file has parse errors)
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
 
-        let functions = doc.functions.functions();
-        let mut raw_tokens: Vec<(u32, u32, u32, u32, u32)> = Vec::new(); // (line, col, len, type, modifiers)
-
-        for func in &functions {
-            if func.span().file_id != 0 {
-                continue;
-            }
-
-            // Add function name token (declaration)
-            if let Ok(name_range) = doc.find_function_name_range(func) {
-                let len = u32::try_from(func.name().as_inner().len()).map_err(LspError::from)?;
-                raw_tokens.push((
-                    name_range.start.line,
-                    name_range.start.character,
-                    len,
-                    semantic_token_types::FUNCTION,
-                    0b11, // DECLARATION | DEFINITION
-                ));
-            }
-
-            // Add function call tokens by walking the expression tree
-            let calls = parse::ExprTree::Expression(func.body())
-                .pre_order_iter()
-                .filter_map(|expr| {
-                    if let parse::ExprTree::Call(call) = expr {
-                        Some((call, get_call_span(call)))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            for (call, span) in calls {
-                if let Ok((start, _end)) = span_to_positions(&span, &doc.text) {
-                    let name = call.name();
-                    let name_str = name.to_string();
-
-                    // Determine token type based on call name
-                    let (token_type, prefix_len) = match name {
-                        parse::CallName::Jet(_) => {
-                            // jet::xxx - add namespace token for "jet" and function for xxx
-                            // First add "jet" as namespace
-                            raw_tokens.push((
-                                start.line,
-                                start.character,
-                                3, // "jet"
-                                semantic_token_types::NAMESPACE,
-                                0,
-                            ));
-                            // The function name starts after "jet::"
-                            (semantic_token_types::FUNCTION, 5)
-                        }
-                        _ => (semantic_token_types::FUNCTION, 0),
-                    };
-
-                    // Add the function name token
-                    let func_name_len = if prefix_len > 0 {
-                        name_str.len().saturating_sub(prefix_len)
-                    } else {
-                        name_str.len()
-                    };
-
-                    if func_name_len > 0 {
-                        raw_tokens.push((
-                            start.line,
-                            start.character + u32::try_from(prefix_len).map_err(LspError::from)?,
-                            u32::try_from(func_name_len).map_err(LspError::from)?,
-                            token_type,
-                            0,
-                        ));
-                    }
-                }
-            }
-        }
-
-        // Sort tokens by position (line, then column)
-        raw_tokens.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-        // Convert to delta-encoded semantic tokens
-        let mut semantic_tokens = Vec::new();
-        let mut prev_line = 0u32;
-        let mut prev_char = 0u32;
-
-        for (line, col, len, token_type, modifiers) in raw_tokens {
-            let delta_line = line - prev_line;
-            let delta_start = if delta_line == 0 {
-                col - prev_char
-            } else {
-                col
-            };
-
-            semantic_tokens.push(SemanticToken {
-                delta_line,
-                delta_start,
-                length: len,
-                token_type,
-                token_modifiers_bitset: modifiers,
-            });
-
-            prev_line = line;
-            prev_char = col;
-        }
-
         Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
             result_id: None,
-            data: semantic_tokens,
+            data: crate::semantic_tokens::tokens(doc),
         })))
     }
 
@@ -533,7 +379,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
 
         // Return None if document not found (e.g., file has parse errors)
         let Some(doc) = documents.get(uri) else {
@@ -587,7 +433,7 @@ impl LanguageServer for Backend {
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
         let uri = &params.text_document_position_params.text_document.uri;
 
         // Return None if document not found (e.g., file has parse errors)
@@ -648,7 +494,7 @@ impl LanguageServer for Backend {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let (source_prefix, functions) = {
-            let documents = self.document_map.read().await;
+            let documents = self.workspace.read().await;
             let Some(doc) = documents.get(uri) else {
                 return Ok(None);
             };
@@ -701,7 +547,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         }
 
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
 
         // Return None if document not found (e.g., file has parse errors)
         let Some(doc) = documents.get(uri) else {
@@ -776,7 +622,7 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
         let uri = &params.text_document_position_params.text_document.uri;
 
         // Return None if document not found (e.g., file has parse errors)
@@ -789,7 +635,7 @@ impl LanguageServer for Backend {
         let token_span = position_to_span(token_position, &doc.text)?;
 
         if let Some(function) = doc.find_imported_function(token_span) {
-            let Some(source_file) = doc.linearization_map.get(function.span().file_id) else {
+            let Some(source_file) = doc.sources.get(function.span().file_id) else {
                 return Ok(None);
             };
             let (start, end) = span_to_positions(function.as_ref(), &source_file.text)?;
@@ -824,7 +670,7 @@ impl LanguageServer for Backend {
                     return Ok(None);
                 };
 
-                let Some(source_file) = doc.linearization_map.get(function.span().file_id) else {
+                let Some(source_file) = doc.sources.get(function.span().file_id) else {
                     return Ok(None);
                 };
 
@@ -840,7 +686,7 @@ impl LanguageServer for Backend {
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
-        let documents = self.document_map.read().await;
+        let documents = self.workspace.read().await;
         let uri = &params.text_document_position.text_document.uri;
 
         let Some(doc) = documents.get(uri) else {
@@ -863,9 +709,12 @@ impl LanguageServer for Backend {
             }
         }
 
-        let Some(func) = functions.iter().find(|func| match call_name {
-            Some(parse::CallName::Custom(name)) => func.name() == name,
-            _ => span_contains(func.span(), &token_span),
+        let Some(func) = (match call_name {
+            Some(parse::CallName::Custom(name)) => doc.functions.get_func(name.as_inner()),
+            _ => functions
+                .iter()
+                .find(|func| span_contains(func.span(), &token_span))
+                .copied(),
         }) else {
             return Ok(None);
         };
@@ -877,17 +726,11 @@ impl LanguageServer for Backend {
             }
         }
 
-        Ok(Some(
-            documents
-                .values()
-                .filter_map(|document| {
-                    document
-                        .find_all_references(&parse::CallName::Custom(func.name().clone()))
-                        .ok()
-                })
-                .flatten()
-                .collect(),
-        ))
+        let Some(identity) = doc.function_identity(func) else {
+            return Ok(None);
+        };
+
+        Ok(Some(documents.find_references_to(&identity)))
     }
 }
 
@@ -895,9 +738,29 @@ impl Backend {
     pub fn new(client: Client) -> Self {
         Self {
             client,
-            document_map: Arc::new(RwLock::new(HashMap::new())),
+            workspace: Arc::new(RwLock::new(WorkspaceState::default())),
+            diagnostic_transaction: DiagnosticTransaction::default(),
             config: Arc::new(RwLock::new(ServerConfig::default())),
             completion_provider: CompletionProvider::new(),
+        }
+    }
+
+    async fn run_diagnostic_transaction<F>(&self, transition: F)
+    where
+        F: FnOnce(&mut WorkspaceState) -> Option<Vec<DiagnosticUpdate>>,
+    {
+        self.diagnostic_transaction
+            .run(&self.workspace, transition, |updates| {
+                self.publish_diagnostic_updates(updates)
+            })
+            .await;
+    }
+
+    async fn publish_diagnostic_updates(&self, updates: Vec<DiagnosticUpdate>) {
+        for update in updates {
+            self.client
+                .publish_diagnostics(update.uri, update.diagnostics, update.version)
+                .await;
         }
     }
 
@@ -929,25 +792,14 @@ impl Backend {
     /// Re-run analysis for every open document, after configuration that affects
     /// dependency resolution has changed.
     async fn reanalyze_open_documents(&self) {
-        let documents = {
-            let documents = self.document_map.read().await;
-            documents
-                .iter()
-                .map(|(uri, doc)| (uri.clone(), doc.text.to_string(), doc.version))
-                .collect::<Vec<_>>()
-        };
-        for (uri, text, version) in documents {
-            self.on_change(TextDocumentItem {
-                uri,
-                text: &text,
-                version,
-            })
-            .await;
+        let documents = self.workspace.write().await.begin_reanalysis();
+        for input in documents {
+            self.on_change(input).await;
         }
     }
 
     /// Function which executed on change of file (`did_save`, `did_open` or `did_change` methods)
-    async fn on_change(&self, params: TextDocumentItem<'_>) {
+    async fn on_change(&self, params: AnalysisInput) {
         let Some(path_buf) = params.uri.to_file_path() else {
             return;
         };
@@ -966,343 +818,26 @@ impl Backend {
             let config = self.config.read().await;
             (config.settings.clone(), config.workspace_roots.clone())
         };
-        let (err, document) = parse_program(params.text, path, &settings, &workspace_roots);
-        let rope = Rope::from_str(params.text);
-        let mut documents = self.document_map.write().await;
-
-        // Analysis above runs without the lock, so a concurrent notification for a newer
-        // version may already have stored its result. Dropping the stale write keeps the
-        // map consistent with the latest text the client sent.
-        let stored_version = documents.get(&params.uri).and_then(|doc| doc.version);
-        if matches!((params.version, stored_version), (Some(incoming), Some(stored)) if incoming < stored)
-        {
-            return;
-        }
-        // `did_save` carries no version; keep the one already recorded rather than
-        // clearing it, so later edits can still be ordered against it.
-        let version = params.version.or(stored_version);
-
-        // A parse failure invalidates every old analysis span, but the latest text must remain
-        // available so completion still works while the user is typing incomplete syntax.
-        let mut document =
-            document.unwrap_or_else(|| Document::new(params.uri.clone(), rope.clone(), version));
-        document.version = version;
-        documents.insert(params.uri.clone(), document);
-        let diagnostics = err
-            .iter()
-            .filter_map(|err| {
-                // Library analysis normally injects a synthetic entry point. Keep entry-point
-                // diagnostics hidden as a defensive fallback so opening a library or an invalidly
-                // nested `main` does not produce editor noise unrelated to the file's definitions.
-                match err.error() {
-                    simplicityhl::error::Error::MainRequired => return None,
-                    simplicityhl::error::Error::CannotParse { msg }
-                        if msg.clone()
-                            == simplicityhl::error::Error::MainOutOfEntryFile.to_string() =>
-                    {
-                        return None;
-                    }
-                    _ => {}
-                }
-
-                // This merged backend owns one open document at a time. Compiler 0.7
-                // diagnostics can point into imported files;
-                // TODO: until multi-document publication is implemented, keep those visible on the
-                // root document without pretending their byte offsets belong to the root source.
-                let range = match err.location() {
-                    CompilerLocation::Code(span) if span.file_id == 0 => {
-                        let Ok((start, end)) = span_to_positions(span, &rope) else {
-                            return None;
-                        };
-                        Range::new(start, end)
-                    }
-                    CompilerLocation::Code(_)
-                    | CompilerLocation::File(_)
-                    | CompilerLocation::Global => Range::default(),
-                };
-                let severity = match err.severity() {
-                    CompilerSeverity::Error => DiagnosticSeverity::ERROR,
-                    CompilerSeverity::Warning => DiagnosticSeverity::WARNING,
-                };
-
-                Some(Diagnostic {
-                    range,
-                    severity: Some(severity),
-                    source: Some("simplicityhl".to_string()),
-                    message: err.error().to_string(),
-                    ..Diagnostic::default()
-                })
-            })
-            .collect();
-
-        self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
-            .await;
+        let snapshot = AnalysisSnapshot::analyze(&params.text, path, &settings, &workspace_roots);
+        self.run_diagnostic_transaction(|workspace| {
+            workspace.replace_if_current(&params.uri, snapshot, params.version, params.generation)
+        })
+        .await;
     }
 
     /// Validate witness (.wit) files
-    async fn on_change_witness(&self, params: TextDocumentItem<'_>) {
-        let diagnostics = validate_witness_file(params.text);
-        self.client
-            .publish_diagnostics(params.uri.clone(), diagnostics, params.version)
-            .await;
-    }
-}
-
-impl Document {
-    /// Create a document from a successfully parsed program and its source.
-    fn from_program(program: &simplicityhl::parse::Program, text: &str, path: &Path) -> Self {
-        let text = Rope::from_str(text);
-        let uri = Uri::from_file_path(path).expect("source path produces a valid file URI");
-        let mut document = Self::new(uri, text, None);
-
-        collect_use_declarations(program.items(), &mut document.use_declarations);
-
-        program
-            .items()
-            .iter()
-            .filter_map(|item| {
-                if let parse::Item::Function(func) = item {
-                    Some(func)
-                } else {
-                    None
-                }
-            })
-            .for_each(|func| {
-                let start_line = offset_to_position(func.span().start, &document.text)
-                    .unwrap_or_default()
-                    .line;
-                document.functions.insert(
-                    func.name().to_string(),
-                    func.to_owned(),
-                    get_comments_from_lines(start_line, &document.text),
-                );
-            });
-
-        document
-    }
-}
-
-fn collect_use_declarations(items: &[parse::Item], declarations: &mut Vec<parse::UseDecl>) {
-    for item in items {
-        match item {
-            parse::Item::Use(use_decl) => declarations.push(use_decl.clone()),
-            parse::Item::Module(module) => {
-                collect_use_declarations(module.items(), declarations);
-            }
-            parse::Item::TypeAlias(_)
-            | parse::Item::Function(_)
-            | parse::Item::EnumDeclaration(_)
-            | parse::Item::Ignored => {}
-        }
-    }
-}
-
-fn items_contain_main(items: &[parse::Item]) -> bool {
-    items.iter().any(|item| match item {
-        parse::Item::Function(function) => function.name().as_inner() == "main",
-        parse::Item::Module(module) => items_contain_main(module.items()),
-        parse::Item::TypeAlias(_)
-        | parse::Item::Use(_)
-        | parse::Item::EnumDeclaration(_)
-        | parse::Item::Ignored => false,
-    })
-}
-
-/// Find the root-file import that pulls another `main` function into the flattened program.
-///
-/// The compiler currently attaches `FunctionRedefined(main)` to the entire flattened program.
-/// For an editor diagnostic, the actionable source location is the `use` declaration that loaded
-/// the file containing the extra entry point.
-fn imported_main_span(
-    items: &[parse::Item],
-    current_source: &CanonSourceFile,
-    dependencies: &DependencyMap,
-    unstable_features: &UnstableFeatures,
-) -> Option<Span> {
-    for item in items {
-        match item {
-            parse::Item::Use(use_decl) => {
-                let Ok(target) = dependencies.resolve_path(current_source.name(), use_decl) else {
-                    continue;
-                };
-
-                // `use crate::<this file>::...` does not introduce another source file.
-                if &target == current_source.name() {
-                    continue;
-                }
-
-                let Ok(source) = std::fs::read_to_string(target.as_path()) else {
-                    continue;
-                };
-                let mut diagnostics = DiagnosticManager::new();
-                let Some(program) = parse::Program::parse_from_str_with_errors(
-                    0,
-                    &source,
-                    unstable_features,
-                    &mut diagnostics,
-                ) else {
-                    continue;
-                };
-
-                if items_contain_main(program.items()) {
-                    return Some(*use_decl.span());
-                }
-            }
-            parse::Item::Module(module) => {
-                if let Some(span) = imported_main_span(
-                    module.items(),
-                    current_source,
-                    dependencies,
-                    unstable_features,
-                ) {
-                    return Some(span);
-                }
-            }
-            parse::Item::TypeAlias(_)
-            | parse::Item::Function(_)
-            | parse::Item::EnumDeclaration(_)
-            | parse::Item::Ignored => {}
-        }
-    }
-
-    None
-}
-
-fn is_duplicate_main(diagnostic: &CompilerDiagnostic) -> bool {
-    matches!(
-        diagnostic.error(),
-        CompilerError::FunctionRedefined { name } if name.as_inner() == "main"
-    )
-}
-
-fn remap_imported_main_diagnostics(
-    diagnostics: &DiagnosticManager,
-    program: &parse::Program,
-    current_source: &CanonSourceFile,
-    dependencies: &DependencyMap,
-    unstable_features: &UnstableFeatures,
-) -> Vec<CompilerDiagnostic> {
-    if !diagnostics.diagnostics().iter().any(is_duplicate_main) {
-        return diagnostics.diagnostics().to_vec();
-    }
-
-    let Some(import_span) = imported_main_span(
-        program.items(),
-        current_source,
-        dependencies,
-        unstable_features,
-    ) else {
-        return diagnostics.diagnostics().to_vec();
-    };
-
-    diagnostics
-        .diagnostics()
-        .iter()
-        .map(|diagnostic| {
-            if !is_duplicate_main(diagnostic) {
-                return diagnostic.clone();
-            }
-
-            let mut remapped = match diagnostic.severity() {
-                CompilerSeverity::Error => {
-                    CompilerDiagnostic::new(diagnostic.error().clone(), import_span)
-                }
-                CompilerSeverity::Warning => {
-                    CompilerDiagnostic::warning(diagnostic.error().clone(), import_span)
-                }
-            };
-            for label in diagnostic.secondary() {
-                remapped = remapped.with_secondary(label.span, label.message.clone());
-            }
-            for note in diagnostic.notes() {
-                remapped = remapped.with_note(note.clone());
-            }
-            if let Some(help) = diagnostic.help() {
-                remapped = remapped.with_help(help.clone());
-            }
-            remapped
+    async fn on_change_witness(&self, params: AnalysisInput) {
+        let diagnostics = validate_witness_file(&params.text);
+        self.run_diagnostic_transaction(|workspace| {
+            workspace.diagnostics_if_current(
+                params.uri.clone(),
+                diagnostics,
+                params.version,
+                params.generation,
+            )
         })
-        .collect()
-}
-
-/// Parse and analyze a program using the [`simplicityhl`] compiler.
-/// Also create a [`Document`] when parsing succeeds.
-fn parse_program(
-    text: &str,
-    path: &Path,
-    settings: &Settings,
-    workspace_roots: &[PathBuf],
-) -> (Vec<CompilerDiagnostic>, Option<Document>) {
-    let unstable_features = settings.unstable_features();
-    let mut diagnostics = DiagnosticManager::new();
-    let text: Arc<str> = Arc::from(text);
-    let source_file = simplicityhl::source::SourceFile::new(path, Arc::clone(&text));
-    let Some(program) = parse::Program::parse_from_str_with_errors(
-        0,
-        text.as_ref(),
-        &unstable_features,
-        &mut diagnostics,
-    ) else {
-        return (diagnostics.diagnostics().to_vec(), None);
-    };
-
-    let mut document = Document::from_program(&program, text.as_ref(), path);
-
-    // Import roots come from the Simplex manifest and the client's settings rather than
-    // from the containing directory, so dependencies resolve the way `simplex` builds them.
-    let dependencies = match ProjectContext::discover(path, &settings.project, workspace_roots)
-        .and_then(|project| project.dependency_map(path))
-    {
-        Ok(dependencies) => dependencies,
-        Err(err) => {
-            diagnostics.push(CompilerDiagnostic::new(
-                CompilerError::CannotParse {
-                    msg: err.to_string(),
-                },
-                Span::new(0, 0..0),
-            ));
-
-            return (diagnostics.diagnostics().to_vec(), Some(document));
-        }
-    };
-    let canonical_source: CanonSourceFile = source_file
-        .clone()
-        .try_into()
-        .expect("name was defined above");
-
-    // FIXME: The compiler analyzes programs from an entry-file perspective and rejects a library file
-    // that has no `main`. Editors open those files directly, though, and still need the resolved
-    // import graph for navigation. A synthetic entry point lets analysis build that graph while
-    // leaving every span in the user's source unchanged. It is never added to `Document`.
-    let analysis_source = if items_contain_main(program.items()) {
-        canonical_source.clone()
-    } else {
-        CanonSourceFile::new(
-            canonical_source.name().clone(),
-            Arc::from(format!("{}\nfn main() {{}}\n", canonical_source.content())),
-        )
-    };
-    let compiler_diagnostics = match TemplateProgram::new_with_dep(
-        analysis_source,
-        &dependencies,
-        &unstable_features,
-        Box::new(ElementsJetHinter::new()),
-    ) {
-        Ok(template_program) => {
-            document.populate_visible_functions(&template_program);
-            template_program.diagnostics().diagnostics().to_vec()
-        }
-        Err(diagnostics) => remap_imported_main_diagnostics(
-            &diagnostics,
-            &program,
-            &canonical_source,
-            &dependencies,
-            &unstable_features,
-        ),
-    };
-
-    (compiler_diagnostics, Some(document))
+        .await;
+    }
 }
 
 /// Validate a witness (.wit) file and return diagnostics.
@@ -1372,10 +907,23 @@ fn validate_witness_file(text: &str) -> Vec<Diagnostic> {
 
 #[cfg(test)]
 mod tests {
-    use simplicityhl::error::Error;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    use ropey::Rope;
+    use simplicityhl::error::{
+        Diagnostic as CompilerDiagnostic, DiagnosticManager, Error, Location as CompilerLocation,
+        Span,
+    };
+    use simplicityhl::parse::ParseFromStrWithErrors;
+    use simplicityhl::UnstableFeatures;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
+    use tower_lsp_server::lsp_types::SemanticToken;
 
     use super::*;
+    use crate::utils::offset_to_position;
 
     /// `parse_program` resolves imports from the project the file lives in, so tests
     /// need a real path on disk rather than a placeholder.
@@ -1386,6 +934,92 @@ mod tests {
         let path = temp.path().join("simf/main.simf");
         std::fs::write(&path, source).expect("write source");
         (temp, path)
+    }
+
+    const IMPORTING_ROOT: &str = "use crate::shared::broken;\nfn main() { broken(); }\n";
+
+    struct DependencyProject {
+        temp: TempDir,
+        root_path: PathBuf,
+        dependency_path: PathBuf,
+        root_uri: Uri,
+        dependency_uri: Uri,
+        settings: Settings,
+    }
+
+    impl DependencyProject {
+        fn new(dependency_source: &str) -> Self {
+            let temp = TempDir::new().expect("temp dir");
+            std::fs::write(temp.path().join("Simplex.toml"), "").expect("write manifest");
+            std::fs::create_dir(temp.path().join("simf")).expect("create source dir");
+            let dependency_path = temp.path().join("simf/shared.simf");
+            let root_path = temp.path().join("simf/main.simf");
+            std::fs::write(&dependency_path, dependency_source).expect("write dependency");
+            std::fs::write(&root_path, IMPORTING_ROOT).expect("write root");
+            let root_uri = Uri::from_file_path(
+                std::fs::canonicalize(&root_path).expect("canonical root path"),
+            )
+            .expect("root URI");
+            let dependency_uri = Uri::from_file_path(
+                std::fs::canonicalize(&dependency_path).expect("canonical dependency path"),
+            )
+            .expect("dependency URI");
+            let settings = Settings::from_json(serde_json::json!({
+                "experimentalFeatures": { "imports": true }
+            }))
+            .expect("valid settings");
+            Self {
+                temp,
+                root_path,
+                dependency_path,
+                root_uri,
+                dependency_uri,
+                settings,
+            }
+        }
+
+        fn root_snapshot(&self) -> AnalysisSnapshot {
+            AnalysisSnapshot::analyze(
+                IMPORTING_ROOT,
+                &self.root_path,
+                &self.settings,
+                &[self.temp.path().to_path_buf()],
+            )
+        }
+
+        fn dependency_snapshot(&self, source: &str) -> AnalysisSnapshot {
+            AnalysisSnapshot::analyze(
+                source,
+                &self.dependency_path,
+                &self.settings,
+                &[self.temp.path().to_path_buf()],
+            )
+        }
+
+        fn write_dependency(&self, source: &str) {
+            std::fs::write(&self.dependency_path, source).expect("write dependency");
+        }
+    }
+
+    fn diagnostic_count(updates: &[DiagnosticUpdate], uri: &Uri) -> usize {
+        updates
+            .iter()
+            .find(|update| &update.uri == uri)
+            .expect("diagnostic update")
+            .diagnostics
+            .len()
+    }
+
+    fn record_count(
+        events: &StdMutex<Vec<(&'static str, usize)>>,
+        label: &'static str,
+        updates: &[DiagnosticUpdate],
+        uri: &Uri,
+    ) {
+        events
+            .lock()
+            .expect("event lock")
+            .push((label, diagnostic_count(updates, uri)));
     }
 
     fn sample_program() -> &'static str {
@@ -1399,6 +1033,359 @@ mod tests {
 
     fn invalid_program_on_parsing() -> &'static str {
         "fn add(a: u32, b: u32) -> u32 "
+    }
+
+    type RawSemanticToken = (u32, u32, u32, u32, u32);
+    const FUNCTION_TOKEN: u32 = 0;
+    const NAMESPACE_TOKEN: u32 = 5;
+
+    fn parse_program(
+        source: &str,
+        path: &Path,
+        settings: &Settings,
+        workspace_roots: &[PathBuf],
+    ) -> (Vec<CompilerDiagnostic>, Option<AnalysisSnapshot>) {
+        let snapshot = AnalysisSnapshot::analyze(source, path, settings, workspace_roots);
+        let mut syntax_diagnostics = DiagnosticManager::new();
+        let parsed = parse::Program::parse_from_str_with_errors(
+            0,
+            source,
+            &settings.unstable_features(),
+            &mut syntax_diagnostics,
+        )
+        .is_some();
+        let diagnostics = snapshot.compiler_diagnostics.clone();
+        (diagnostics, parsed.then_some(snapshot))
+    }
+
+    fn document_from_source(source: &str) -> AnalysisSnapshot {
+        let mut diagnostics = DiagnosticManager::new();
+        let program = parse::Program::parse_from_str_with_errors(
+            0,
+            source,
+            &UnstableFeatures::none(),
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
+        let path = std::env::temp_dir().join("semantic_tokens.simf");
+        AnalysisSnapshot::from_program(&program, source, &path)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn diagnostic_transactions_do_not_interleave_state_and_publication() {
+        let project = DependencyProject::new("pub fn broken() -> u32 { false }\n");
+        let old_snapshot = project.root_snapshot();
+        project.write_dependency("pub fn broken() -> u32 { 0 }\n");
+        let new_snapshot = project.root_snapshot();
+        let root_uri = project.root_uri.clone();
+        let dependency_uri = project.dependency_uri.clone();
+
+        let transaction = StdArc::new(DiagnosticTransaction::default());
+        let workspace = StdArc::new(RwLock::new(WorkspaceState::default()));
+        let old_input = workspace
+            .write()
+            .await
+            .begin_open(&root_uri, IMPORTING_ROOT, Some(1));
+        let first_started = StdArc::new(Notify::new());
+        let release_first = StdArc::new(Notify::new());
+        let second_started = StdArc::new(Notify::new());
+        let second_transition_ran = StdArc::new(AtomicBool::new(false));
+        let events = StdArc::new(StdMutex::new(Vec::new()));
+
+        let first_wait = first_started.notified();
+        let first = {
+            let transaction = StdArc::clone(&transaction);
+            let workspace = StdArc::clone(&workspace);
+            let first_started = StdArc::clone(&first_started);
+            let release_first = StdArc::clone(&release_first);
+            let events = StdArc::clone(&events);
+            let root_uri = root_uri.clone();
+            let dependency_uri = dependency_uri.clone();
+            tokio::spawn(async move {
+                transaction
+                    .run(
+                        &workspace,
+                        |workspace| {
+                            workspace.replace_if_current(
+                                &root_uri,
+                                old_snapshot,
+                                old_input.version,
+                                old_input.generation,
+                            )
+                        },
+                        |updates| async move {
+                            record_count(
+                                &events,
+                                "first publication started",
+                                &updates,
+                                &dependency_uri,
+                            );
+                            first_started.notify_one();
+                            release_first.notified().await;
+                            record_count(
+                                &events,
+                                "first publication finished",
+                                &updates,
+                                &dependency_uri,
+                            );
+                        },
+                    )
+                    .await;
+            })
+        };
+        first_wait.await;
+        let new_input = workspace
+            .write()
+            .await
+            .begin_change(&root_uri, IMPORTING_ROOT, Some(2))
+            .expect("new analysis ticket");
+
+        let second_wait = second_started.notified();
+        let second = {
+            let transaction = StdArc::clone(&transaction);
+            let workspace = StdArc::clone(&workspace);
+            let second_started = StdArc::clone(&second_started);
+            let second_transition_ran = StdArc::clone(&second_transition_ran);
+            let events = StdArc::clone(&events);
+            let root_uri = root_uri.clone();
+            let dependency_uri = dependency_uri.clone();
+            tokio::spawn(async move {
+                second_started.notify_one();
+                transaction
+                    .run(
+                        &workspace,
+                        |workspace| {
+                            second_transition_ran.store(true, Ordering::SeqCst);
+                            workspace.replace_if_current(
+                                &root_uri,
+                                new_snapshot,
+                                new_input.version,
+                                new_input.generation,
+                            )
+                        },
+                        |updates| async move {
+                            record_count(&events, "second publication", &updates, &dependency_uri);
+                        },
+                    )
+                    .await;
+            })
+        };
+
+        second_wait.await;
+        tokio::task::yield_now().await;
+        assert!(!second_transition_ran.load(Ordering::SeqCst));
+
+        release_first.notify_one();
+        first.await.expect("first transaction");
+        second.await.expect("second transaction");
+        assert_eq!(
+            *events.lock().expect("event lock"),
+            [
+                ("first publication started", 1),
+                ("first publication finished", 1),
+                ("second publication", 0)
+            ]
+        );
+
+        let workspace = workspace.read().await;
+        let final_snapshot = workspace.get(&root_uri).expect("latest root snapshot");
+        let final_diagnostics = crate::diagnostics::DiagnosticBundle::from_snapshot(final_snapshot);
+        assert!(final_diagnostics.get(&dependency_uri).is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_document_restores_dependency_diagnostics_through_transaction() {
+        let broken_dependency = "pub fn broken() -> u32 { false }\n";
+        let clean_dependency = "pub fn broken() -> u32 { 0 }\n";
+        let project = DependencyProject::new(broken_dependency);
+        let root_snapshot = project.root_snapshot();
+        let clean_snapshot = project.dependency_snapshot(clean_dependency);
+        let root_uri = project.root_uri.clone();
+        let dependency_uri = project.dependency_uri.clone();
+
+        let transaction = DiagnosticTransaction::default();
+        let workspace = RwLock::new(WorkspaceState::default());
+        let root_input = workspace
+            .write()
+            .await
+            .begin_open(&root_uri, IMPORTING_ROOT, Some(1));
+        workspace
+            .write()
+            .await
+            .replace_if_current(
+                &root_uri,
+                root_snapshot,
+                root_input.version,
+                root_input.generation,
+            )
+            .expect("root diagnostic update");
+        let open = workspace
+            .write()
+            .await
+            .begin_open(&dependency_uri, clean_dependency, Some(7));
+        let publications = StdArc::new(StdMutex::new(Vec::new()));
+
+        transaction
+            .run(
+                &workspace,
+                |workspace| {
+                    workspace.replace_if_current(
+                        &dependency_uri,
+                        clean_snapshot,
+                        open.version,
+                        open.generation,
+                    )
+                },
+                {
+                    let publications = StdArc::clone(&publications);
+                    let dependency_uri = dependency_uri.clone();
+                    move |updates| async move {
+                        let update = updates
+                            .iter()
+                            .find(|update| update.uri == dependency_uri)
+                            .expect("direct dependency update");
+                        publications
+                            .lock()
+                            .expect("publication lock")
+                            .push((update.diagnostics.len(), update.version));
+                    }
+                },
+            )
+            .await;
+
+        let close_generation = workspace
+            .write()
+            .await
+            .begin_close(&dependency_uri)
+            .expect("close ticket");
+        transaction
+            .run(
+                &workspace,
+                |workspace| workspace.remove_if_current(&dependency_uri, close_generation),
+                {
+                    let publications = StdArc::clone(&publications);
+                    let dependency_uri = dependency_uri.clone();
+                    move |updates| async move {
+                        let update = updates
+                            .iter()
+                            .find(|update| update.uri == dependency_uri)
+                            .expect("restored dependency update");
+                        publications
+                            .lock()
+                            .expect("publication lock")
+                            .push((update.diagnostics.len(), update.version));
+                    }
+                },
+            )
+            .await;
+
+        assert_eq!(
+            *publications.lock().expect("publication lock"),
+            [(0, Some(7)), (1, None)]
+        );
+    }
+
+    fn decode_semantic_tokens(tokens: &[SemanticToken]) -> Vec<RawSemanticToken> {
+        let mut line = 0;
+        let mut character = 0;
+        tokens
+            .iter()
+            .map(|token| {
+                line += token.delta_line;
+                character = if token.delta_line == 0 {
+                    character + token.delta_start
+                } else {
+                    token.delta_start
+                };
+                (
+                    line,
+                    character,
+                    token.length,
+                    token.token_type,
+                    token.token_modifiers_bitset,
+                )
+            })
+            .collect()
+    }
+
+    fn expected_token(
+        source: &str,
+        offset: usize,
+        text: &str,
+        token_type: u32,
+    ) -> RawSemanticToken {
+        let rope = Rope::from_str(source);
+        let start = offset_to_position(offset, &rope).expect("valid token start");
+        let end = offset_to_position(offset + text.len(), &rope).expect("valid token end");
+        (
+            start.line,
+            start.character,
+            end.character - start.character,
+            token_type,
+            0,
+        )
+    }
+
+    #[test]
+    fn semantic_tokens_split_generic_callable_components() {
+        let source = "// 😀 keeps UTF-16 columns honest\nfn consume_budget(acc: u32, item: u32) -> u32 { acc }\nfn main() { array_fold::<consume_budget, 320>(witness::PADDING, true); }\n";
+        let document = document_from_source(source);
+        let decoded = decode_semantic_tokens(&crate::semantic_tokens::tokens(&document));
+        let builtin_offset = source.find("array_fold").expect("array_fold call");
+        let callback_offset = source.rfind("consume_budget").expect("callback argument");
+
+        assert!(decoded.contains(&expected_token(
+            source,
+            builtin_offset,
+            "array_fold",
+            FUNCTION_TOKEN,
+        )));
+        assert!(decoded.contains(&expected_token(
+            source,
+            callback_offset,
+            "consume_budget",
+            FUNCTION_TOKEN,
+        )));
+
+        let bound_offset = source.find("320").expect("array bound");
+        let bound_position = offset_to_position(bound_offset, &document.text).unwrap();
+        assert!(!decoded.iter().any(|token| {
+            token.0 == bound_position.line
+                && token.1 <= bound_position.character
+                && token.1 + token.2 > bound_position.character
+        }));
+    }
+
+    #[test]
+    fn semantic_tokens_bound_each_builtin_to_its_identifier() {
+        let source = "fn step(acc: u32, item: u32) -> u32 { acc }\nfn main() {\nfold::<step, 2>(0, 0);\nfor_while::<step>(0);\nunwrap_left::<u32>(0);\n<u32>::into(0);\njet::add_32(0, 0);\nassert!(true);\n}\n";
+        let document = document_from_source(source);
+        let decoded = decode_semantic_tokens(&crate::semantic_tokens::tokens(&document));
+
+        for name in ["fold", "for_while", "unwrap_left", "into", "assert!"] {
+            let offset = source
+                .find(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(decoded.contains(&expected_token(source, offset, name, FUNCTION_TOKEN,)));
+        }
+
+        let callback_offsets = [
+            source.find("step, 2").unwrap(),
+            source.rfind("step").unwrap(),
+        ];
+        for offset in callback_offsets {
+            assert!(decoded.contains(&expected_token(source, offset, "step", FUNCTION_TOKEN,)));
+        }
+
+        let jet_offset = source.find("jet::add_32").unwrap();
+        assert!(decoded.contains(&expected_token(source, jet_offset, "jet", NAMESPACE_TOKEN,)));
+        assert!(decoded.contains(&expected_token(
+            source,
+            jet_offset + "jet::".len(),
+            "add_32",
+            FUNCTION_TOKEN,
+        )));
     }
 
     #[test]
@@ -1437,7 +1424,7 @@ mod tests {
             .get_func(call.name().to_string().as_str())
             .expect("helper definition");
         let source_file = doc
-            .linearization_map
+            .sources
             .get(function.span().file_id)
             .expect("current file should always have source metadata");
 
@@ -1524,7 +1511,7 @@ mod tests {
             .is_none());
 
         let source_file = doc
-            .linearization_map
+            .sources
             .get(original.span().file_id)
             .expect("imported source metadata");
         assert_eq!(
@@ -1593,8 +1580,7 @@ mod tests {
         assert_eq!(transitive.name().as_inner(), "hash");
         assert_eq!(transitive_alias.name().as_inner(), "hash");
 
-        let definition_uri =
-            |function: &parse::Function| &doc.linearization_map[function.span().file_id].uri;
+        let definition_uri = |function: &parse::Function| &doc.sources[function.span().file_id].uri;
         let merkle_uri =
             Uri::from_file_path(std::fs::canonicalize(merkle_path).expect("canonical merkle path"))
                 .expect("merkle URI");
@@ -1809,6 +1795,80 @@ mod tests {
             panic!("duplicate main should point to source code");
         };
         assert_eq!(span.to_slice(&source), Some(import));
+    }
+
+    #[test]
+    fn imported_diagnostic_points_to_its_real_file() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path();
+        std::fs::write(root.join("Simplex.toml"), "").expect("write manifest");
+        std::fs::create_dir(root.join("simf")).expect("create source dir");
+        let library_path = root.join("simf/library.simf");
+        let library_source = "pub fn broken() -> (u1, u256) { 0 }\n";
+        std::fs::write(&library_path, library_source).expect("write imported module");
+
+        let source = "use crate::library::broken;\nfn main() { broken(); }\n";
+        let path = root.join("simf/main.simf");
+        std::fs::write(&path, source).expect("write entry file");
+        let settings = Settings::from_json(serde_json::json!({
+            "experimentalFeatures": { "imports": true }
+        }))
+        .expect("valid settings");
+
+        let (_errors, document) = parse_program(source, &path, &settings, &[root.to_path_buf()]);
+        let document = document.expect("document remains available after analysis errors");
+        assert!(document.sources.len() > 1);
+        let bundle = crate::diagnostics::DiagnosticBundle::from_snapshot(&document);
+        let library_uri = Uri::from_file_path(
+            std::fs::canonicalize(&library_path).expect("canonical library path"),
+        )
+        .expect("library URI");
+        let root_uri = Uri::from_file_path(std::fs::canonicalize(&path).expect("canonical root"))
+            .expect("root URI");
+
+        let imported_error = bundle
+            .get(&library_uri)
+            .and_then(|diagnostics| {
+                diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.message.contains("Expected expression"))
+            })
+            .unwrap_or_else(|| panic!("expected imported diagnostic, got {bundle:?}"));
+        assert_ne!(imported_error.range, Range::default());
+        assert!(!bundle.get(&root_uri).is_some_and(|diagnostics| {
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == imported_error.message)
+        }));
+    }
+
+    #[test]
+    fn lsp_diagnostics_preserve_secondary_labels_notes_and_help() {
+        let source = "fn main() {}\n";
+        let mut document = document_from_source(source);
+        let diagnostic = CompilerDiagnostic::new(
+            Error::CannotParse {
+                msg: "primary".to_string(),
+            },
+            Span::new(0, 3..7),
+        )
+        .with_secondary(Span::new(0, 0..2), "secondary")
+        .with_note("context")
+        .with_help("fix it");
+        document.compiler_diagnostics = vec![diagnostic];
+        let bundle = crate::diagnostics::DiagnosticBundle::from_snapshot(&document);
+        let uri = &document.sources[0].uri;
+        let published = &bundle.get(uri).expect("root diagnostic")[0];
+
+        assert!(published.message.contains("Note: context"));
+        assert!(published.message.contains("Help: fix it"));
+        let related = published
+            .related_information
+            .as_ref()
+            .expect("secondary label becomes related information");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].message, "secondary");
+        assert_eq!(related[0].location.uri, document.sources[0].uri);
     }
 
     #[test]
