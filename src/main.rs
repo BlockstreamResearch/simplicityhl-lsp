@@ -4,7 +4,6 @@ mod analysis;
 mod backend;
 mod completion;
 mod config;
-mod diagnostics;
 mod error;
 mod imports;
 mod navigation;

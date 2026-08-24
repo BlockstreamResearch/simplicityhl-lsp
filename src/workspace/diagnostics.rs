@@ -1,3 +1,5 @@
+//! Conversion and aggregation inputs for compiler diagnostics owned by workspace state.
+
 use std::collections::HashMap;
 
 use simplicityhl::error::{
@@ -110,3 +112,6 @@ fn message(diagnostic: &CompilerDiagnostic) -> String {
     }
     message
 }
+
+#[cfg(test)]
+mod tests;

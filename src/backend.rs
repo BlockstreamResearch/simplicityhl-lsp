@@ -1192,7 +1192,8 @@ mod tests {
 
         let workspace = workspace.read().await;
         let final_snapshot = workspace.get(&root_uri).expect("latest root snapshot");
-        let final_diagnostics = crate::diagnostics::DiagnosticBundle::from_snapshot(final_snapshot);
+        let final_diagnostics =
+            crate::workspace::diagnostics::DiagnosticBundle::from_snapshot(final_snapshot);
         assert!(final_diagnostics.get(&dependency_uri).is_none());
     }
 
@@ -1820,7 +1821,7 @@ mod tests {
         let (_errors, document) = parse_program(source, &path, &settings, &[root.to_path_buf()]);
         let document = document.expect("document remains available after analysis errors");
         assert!(document.sources.len() > 1);
-        let bundle = crate::diagnostics::DiagnosticBundle::from_snapshot(&document);
+        let bundle = crate::workspace::diagnostics::DiagnosticBundle::from_snapshot(&document);
         let library_uri = Uri::from_file_path(
             std::fs::canonicalize(&library_path).expect("canonical library path"),
         )
@@ -1858,7 +1859,7 @@ mod tests {
         .with_note("context")
         .with_help("fix it");
         document.compiler_diagnostics = vec![diagnostic];
-        let bundle = crate::diagnostics::DiagnosticBundle::from_snapshot(&document);
+        let bundle = crate::workspace::diagnostics::DiagnosticBundle::from_snapshot(&document);
         let uri = &document.sources[0].uri;
         let published = &bundle.get(uri).expect("root diagnostic")[0];
 
