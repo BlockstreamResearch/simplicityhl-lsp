@@ -33,9 +33,11 @@ use crate::config::Settings;
 use crate::error::LspError;
 use crate::imports::{self, ImportCompletionContext};
 use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
+use crate::text::{
+    get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
+};
 use crate::utils::{
     create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
-    get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
 };
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
@@ -923,7 +925,7 @@ mod tests {
     use tower_lsp_server::lsp_types::SemanticToken;
 
     use super::*;
-    use crate::utils::offset_to_position;
+    use crate::text::offset_to_position;
 
     /// `parse_program` resolves imports from the project the file lives in, so tests
     /// need a real path on disk rather than a placeholder.

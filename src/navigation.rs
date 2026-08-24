@@ -6,7 +6,7 @@ use tower_lsp_server::lsp_types::{self, Uri};
 
 use crate::analysis::AnalysisSnapshot;
 use crate::error::LspError;
-use crate::utils::{get_call_span, offset_to_position, span_contains, span_to_positions};
+use crate::text::{get_call_span, offset_to_position, span_contains, span_to_positions};
 
 /// Stable identity for one function definition across independently analyzed roots.
 #[derive(Clone, Debug, Eq, PartialEq)]

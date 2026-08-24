@@ -6,7 +6,7 @@ use tower_lsp_server::lsp_types::{
 };
 
 use crate::analysis::AnalysisSnapshot;
-use crate::utils::span_to_positions;
+use crate::text::span_to_positions;
 
 mod token_type {
     pub const FUNCTION: u32 = 0;

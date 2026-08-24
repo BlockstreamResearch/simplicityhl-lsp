@@ -12,7 +12,7 @@ use tower_lsp_server::lsp_types::{
 
 use crate::completion;
 use crate::project::ProjectContext;
-use crate::utils::{get_comments_from_lines, offset_to_position};
+use crate::text::{get_comments_from_lines, offset_to_position};
 
 #[derive(Clone, Debug)]
 struct Candidate {

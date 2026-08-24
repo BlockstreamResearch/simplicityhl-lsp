@@ -11,6 +11,7 @@ mod imports;
 mod navigation;
 mod project;
 mod semantic_tokens;
+mod text;
 mod utils;
 mod workspace;
 

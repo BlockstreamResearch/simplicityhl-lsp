@@ -20,7 +20,7 @@ use tower_lsp_server::UriExt;
 use crate::config::Settings;
 use crate::function::Functions;
 use crate::project::ProjectContext;
-use crate::utils::{get_comments_from_lines, offset_to_position};
+use crate::text::{get_comments_from_lines, offset_to_position};
 
 /// A compiler source together with the editor identity and text used for LSP ranges.
 #[derive(Debug)]

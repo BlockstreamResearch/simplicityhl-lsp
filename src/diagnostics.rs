@@ -9,7 +9,7 @@ use tower_lsp_server::lsp_types::{
 };
 
 use crate::analysis::AnalysisSnapshot;
-use crate::utils::span_to_positions;
+use crate::text::span_to_positions;
 
 /// Diagnostics produced by one analysis root, grouped by the source that owns each range.
 #[derive(Debug, Default)]
