@@ -20,8 +20,8 @@ use simplicityhl::parse;
 
 use crate::analysis::AnalysisSnapshot;
 use crate::completion;
+use crate::completion::imports::{self, ImportCompletionContext};
 use crate::config::Settings;
-use crate::imports::{self, ImportCompletionContext};
 use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::text::{
     get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,

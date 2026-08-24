@@ -196,7 +196,7 @@ mod tests {
             &UnstableFeatures::none(),
             &mut diagnostics,
         )
-            .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
+        .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
         AnalysisSnapshot::from_program(
             &program,
             source,

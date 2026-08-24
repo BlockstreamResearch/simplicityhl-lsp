@@ -1,6 +1,7 @@
 use simplicityhl::parse::Function;
 
 pub mod builtin;
+pub(crate) mod imports;
 pub mod jet;
 pub mod tokens;
 pub mod type_cast;
