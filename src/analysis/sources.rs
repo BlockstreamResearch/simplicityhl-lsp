@@ -36,11 +36,6 @@ impl Functions {
         self.0.values().map(|(function, _)| function)
     }
 
-    /// Compatibility with the current navigation/server callers; later slices use [`Self::iter`].
-    pub fn functions(&self) -> Vec<&parse::Function> {
-        self.iter().collect()
-    }
-
     pub fn functions_and_docs(&self) -> Vec<(&parse::Function, &str)> {
         self.0
             .values()
@@ -82,20 +77,22 @@ impl SourceSet {
         self.by_id.len()
     }
 
-    fn from_compiler(source_map: &SourceMap, root_text: &Rope) -> Self {
+    fn from_compiler(source_map: &SourceMap, root_uri: &Uri, root_text: &Rope) -> Self {
         let by_id = source_map
             .iter()
             .map(|(path, file_id)| {
-                let uri = Uri::from_file_path(path.as_path())
-                    .expect("compiler source path produces a valid file URI");
-                let text = if *file_id == 0 {
-                    root_text.clone()
+                let (uri, text) = if *file_id == 0 {
+                    (root_uri.clone(), root_text.clone())
                 } else {
-                    Rope::from_str(
-                        source_map
-                            .content(*file_id)
-                            .expect("compiler source map contains every registered file")
-                            .as_ref(),
+                    (
+                        Uri::from_file_path(path.as_path())
+                            .expect("compiler source path produces a valid file URI"),
+                        Rope::from_str(
+                            source_map
+                                .content(*file_id)
+                                .expect("compiler source map contains every registered file")
+                                .as_ref(),
+                        ),
                     )
                 };
                 (*file_id, SourceDocument { uri, text })
@@ -115,6 +112,7 @@ impl Index<usize> for SourceSet {
 
 impl AnalysisSnapshot {
     pub(super) fn populate_sources(&mut self, source_map: &SourceMap) {
-        self.sources = SourceSet::from_compiler(source_map, &self.text);
+        let root_uri = self.sources.root_source().uri.clone();
+        self.sources = SourceSet::from_compiler(source_map, &root_uri, &self.text);
     }
 }

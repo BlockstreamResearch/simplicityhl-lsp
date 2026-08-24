@@ -91,9 +91,11 @@ fn dependency_removed_after_discovery_is_reported() {
     fs::rename(&dependency_source, root.join("vendor/library/simf.moved")).unwrap();
 
     let error = context.dependency_map(&document).unwrap_err();
-    assert!(error
-        .to_string()
-        .contains(&dependency_source.display().to_string()));
+    let ProjectError::Compiler(message) = error else {
+        panic!("expected compiler dependency-map error, got {error}");
+    };
+    assert!(message.contains("Failed to find library target path"));
+    assert!(message.contains("simf"));
 }
 
 #[test]

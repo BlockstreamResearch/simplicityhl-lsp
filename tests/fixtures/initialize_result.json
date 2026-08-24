@@ -1,0 +1,58 @@
+{
+  "capabilities": {
+    "textDocumentSync": {
+      "openClose": true,
+      "change": 1,
+      "save": {
+        "includeText": true
+      }
+    },
+    "hoverProvider": true,
+    "completionProvider": {
+      "resolveProvider": false,
+      "triggerCharacters": [
+        ":",
+        "<",
+        " ",
+        "{",
+        ","
+      ]
+    },
+    "signatureHelpProvider": {
+      "triggerCharacters": [
+        "(",
+        ","
+      ],
+      "retriggerCharacters": [
+        ","
+      ]
+    },
+    "definitionProvider": true,
+    "referencesProvider": true,
+    "documentSymbolProvider": true,
+    "workspace": {
+      "workspaceFolders": {
+        "supported": true,
+        "changeNotifications": true
+      }
+    },
+    "semanticTokensProvider": {
+      "legend": {
+        "tokenTypes": [
+          "function",
+          "parameter",
+          "variable",
+          "type",
+          "keyword",
+          "namespace"
+        ],
+        "tokenModifiers": [
+          "declaration",
+          "definition"
+        ]
+      },
+      "range": false,
+      "full": true
+    }
+  }
+}

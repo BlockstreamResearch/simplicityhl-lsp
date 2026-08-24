@@ -19,6 +19,18 @@ use crate::config::Settings;
 use crate::text::{offset_to_position, span_to_positions};
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
+#[test]
+fn watched_file_registration_matches_the_protocol_contract() {
+    assert_eq!(
+        serde_json::to_value(super::capabilities::watched_files()).unwrap(),
+        serde_json::json!([
+            { "globPattern": "**/*.simf" },
+            { "globPattern": "**/Simplex.toml" },
+            { "globPattern": "**/simplex.toml" }
+        ])
+    );
+}
+
 type WitnessPublications = StdArc<StdMutex<Vec<(Option<i32>, Vec<String>)>>>;
 
 async fn capture_witness_update(
@@ -480,8 +492,7 @@ fn library_file_without_main_keeps_definition_metadata() {
     assert_eq!(function.span().file_id, 0);
     assert_eq!(
         source_file.uri,
-        Uri::from_file_path(std::fs::canonicalize(&path).expect("canonical path"))
-            .expect("file URI")
+        Uri::from_file_path(&path).expect("file URI")
     );
 }
 
@@ -684,8 +695,7 @@ fn function_selection_range_is_inside_its_document_symbol_range() {
     let doc = doc.expect("document");
     let function = doc
         .functions
-        .functions()
-        .into_iter()
+        .iter()
         .find(|function| function.name().as_inner() == "main")
         .expect("main function");
     let (start, end) = span_to_positions(function.span(), &doc.text).unwrap();
@@ -717,8 +727,7 @@ fn stale_analysis_cannot_produce_an_out_of_bounds_selection_range() {
     let mut doc = doc.expect("document");
     let function = doc
         .functions
-        .functions()
-        .into_iter()
+        .iter()
         .find(|function| function.name().as_inner() == "main")
         .expect("main function")
         .clone();

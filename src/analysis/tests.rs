@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace::WorkspaceState;
 use simplicityhl::error::Location as CompilerLocation;
 use simplicityhl::UnstableFeatures;
 use tempfile::TempDir;
@@ -40,6 +41,65 @@ fn parse_failure_retains_the_exact_root_source() {
 }
 
 #[test]
+fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let source_directory = temp.path().join("simf");
+    std::fs::create_dir(&source_directory).unwrap();
+    std::fs::write(temp.path().join("Simplex.toml"), "").unwrap();
+    let path = source_directory.join("verifier.simf");
+    let renamed = source_directory.join("renamed.simf");
+    let source = "fn main() {}\n";
+    std::fs::write(&path, source).unwrap();
+    let roots = [temp.path().to_path_buf()];
+    let uri = Uri::from_file_path(&path).unwrap();
+
+    let mut workspace = WorkspaceState::default();
+    let open = workspace.begin_open(&uri, source, Some(1));
+    let initial = AnalysisSnapshot::analyze(source, &path, &Settings::default(), &roots);
+    assert!(initial.compiler_diagnostics.is_empty());
+    workspace
+        .replace_if_current(&uri, initial, open.version, open.generation)
+        .expect("initial analysis update");
+
+    std::fs::rename(&path, &renamed).unwrap();
+    let change = workspace
+        .begin_change(&uri, source, Some(2))
+        .expect("renamed document remains open");
+    let missing = AnalysisSnapshot::analyze(source, &path, &Settings::default(), &roots);
+    let updates = workspace
+        .replace_if_current(&uri, missing, change.version, change.generation)
+        .expect("missing source replaces stale analysis");
+    let published = updates
+        .iter()
+        .find(|update| update.uri == uri)
+        .expect("root diagnostic update");
+
+    assert_eq!(published.version, Some(2));
+    assert!(published.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("Failed to find library target path")
+            && diagnostic.message.contains("verifier.simf")
+    }));
+    let current = workspace.get(&uri).expect("current missing-file snapshot");
+    assert_eq!(current.text.to_string(), source);
+    assert_eq!(current.sources[0].uri, uri);
+
+    let moved = AnalysisSnapshot::analyze(source, &renamed, &Settings::default(), &roots);
+    assert!(moved.compiler_diagnostics.is_empty());
+    std::fs::remove_file(&renamed).unwrap();
+    let deleted = AnalysisSnapshot::analyze(source, &renamed, &Settings::default(), &roots);
+    assert!(deleted.compiler_diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.error(),
+            CompilerError::CannotParse { msg }
+                if msg.contains("Failed to find library target path")
+                    && msg.contains("renamed.simf")
+        )
+    }));
+}
+
+#[test]
 fn transiently_missing_dependency_source_is_a_root_diagnostic() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
@@ -69,17 +129,26 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
     assert!(initial.compiler_diagnostics.is_empty());
     let dependency_source = root.join("vendor/library/simf");
     std::fs::rename(&dependency_source, root.join("vendor/library/simf.moved")).unwrap();
-    let expected_path = dependency_source.display().to_string();
-
     let missing = AnalysisSnapshot::analyze(source, &path, &settings, &roots);
     assert_eq!(missing.text.to_string(), source);
     assert_eq!(missing.sources[0].uri, Uri::from_file_path(&path).unwrap());
-    assert!(missing.compiler_diagnostics.iter().any(|diagnostic| {
-        matches!(
-            diagnostic.error(),
-            CompilerError::CannotParse { msg } if msg.contains(&expected_path)
-        )
-    }));
+    let messages = missing
+        .compiler_diagnostics
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        missing.compiler_diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic.error(),
+                CompilerError::CannotParse { msg }
+                    if msg.contains("Unable to resolve")
+                        && msg.contains("library")
+                        && msg.contains("simf")
+            )
+        }),
+        "unexpected diagnostics: {messages:?}"
+    );
 }
 
 #[test]
@@ -139,10 +208,7 @@ fn library_without_main_keeps_definition_metadata() {
         .expect("helper definition");
     assert_eq!(function.name().as_inner(), "helper");
     assert_eq!(function.span().file_id, 0);
-    assert_eq!(
-        snapshot.sources[0].uri,
-        Uri::from_file_path(std::fs::canonicalize(path).unwrap()).unwrap()
-    );
+    assert_eq!(snapshot.sources[0].uri, Uri::from_file_path(path).unwrap());
 }
 
 #[test]

@@ -16,7 +16,7 @@ mod workspace;
 use server::Backend;
 use tower_lsp_server::{LspService, Server};
 
-/// Serve the SimplicityHL language server over the process standard streams.
+/// Serve the `SimplicityHL` language server over the process standard streams.
 pub async fn run_stdio() {
     let (service, socket) = LspService::new(Backend::new);
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)

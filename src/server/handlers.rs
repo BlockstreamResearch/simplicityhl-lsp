@@ -242,10 +242,9 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let functions = doc.functions.functions();
+        let functions = doc.functions.iter();
 
         let symbols: Vec<DocumentSymbol> = functions
-            .iter()
             .filter_map(|func| {
                 if func.span().file_id != 0 {
                     return None;
@@ -452,8 +451,6 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
-        let functions = doc.functions.functions();
-
         let token_position = params.text_document_position.position;
 
         let token_span = position_to_span(token_position, &doc.text)?;
@@ -471,10 +468,10 @@ impl LanguageServer for Backend {
 
         let Some(func) = (match call_name {
             Some(parse::CallName::Custom(name)) => doc.functions.get_func(name.as_inner()),
-            _ => functions
+            _ => doc
+                .functions
                 .iter()
-                .find(|func| span_contains(func.span(), &token_span))
-                .copied(),
+                .find(|func| span_contains(func.span(), &token_span)),
         }) else {
             return Ok(None);
         };
