@@ -9,6 +9,7 @@ mod navigation;
 mod project;
 mod semantic_tokens;
 mod server;
+mod signature_help;
 mod text;
 mod utils;
 mod workspace;

@@ -21,15 +21,12 @@ use simplicityhl::parse;
 use crate::analysis::AnalysisSnapshot;
 use crate::completion;
 use crate::config::Settings;
-use crate::error::LspError;
 use crate::imports::{self, ImportCompletionContext};
 use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::text::{
     get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
 };
-use crate::utils::{
-    create_signature_info, find_builtin_signature, find_function_call_context, find_key_position,
-};
+use crate::utils::find_key_position;
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
 use super::capabilities::{initialize_result, watched_files, workspace_roots};
@@ -301,53 +298,10 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let token_pos = params.text_document_position_params.position;
-
-        // Get the current line up to cursor position
-        let line = doc
-            .text
-            .lines()
-            .nth(token_pos.line as usize)
-            .ok_or(LspError::Internal("Line not found".into()))?;
-
-        let line_str = line
-            .get_slice(..token_pos.character as usize)
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-
-        // Find function call context: look for unclosed '(' and count commas
-        let Some((func_name, active_param)) = find_function_call_context(&line_str) else {
-            return Ok(None);
-        };
-
-        // Try to find the function signature
-        let signature_info = if func_name.starts_with("jet::") {
-            // It's a jet function
-            let jet_name = func_name.strip_prefix("jet::").unwrap_or(&func_name);
-            match simplicityhl::simplicity::jet::Elements::from_str(jet_name) {
-                Ok(element) => {
-                    let template = completion::jet::jet_to_template(element);
-                    Some(create_signature_info(&template))
-                }
-                Err(_) => None,
-            }
-        } else if let Some((function, function_doc)) = doc.functions.get(&func_name) {
-            // It's a custom function
-            let template = completion::function_to_template(function, function_doc);
-            Some(create_signature_info(&template))
-        } else {
-            // Try builtin functions
-            find_builtin_signature(&func_name)
-        };
-
-        match signature_info {
-            Some(sig) => Ok(Some(SignatureHelp {
-                signatures: vec![sig],
-                active_signature: Some(0),
-                active_parameter: Some(active_param),
-            })),
-            None => Ok(None),
-        }
+        Ok(crate::signature_help::at(
+            doc,
+            params.text_document_position_params.position,
+        )?)
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
