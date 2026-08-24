@@ -489,60 +489,7 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
-        let functions = doc.functions.functions();
-
-        let token_position = params.text_document_position_params.position;
-        let token_span = position_to_span(token_position, &doc.text)?;
-
-        if let Some(function) = doc.find_imported_function(token_span) {
-            let Some(source_file) = doc.sources.get(function.span().file_id) else {
-                return Ok(None);
-            };
-            let (start, end) = span_to_positions(function.as_ref(), &source_file.text)?;
-
-            return Ok(Some(GotoDefinitionResponse::from(Location::new(
-                source_file.uri.clone(),
-                Range::new(start, end),
-            ))));
-        }
-
-        let Some(call) = doc.find_related_call(token_span) else {
-            let Some(func) = functions
-                .iter()
-                .find(|func| span_contains(func.span(), &token_span))
-            else {
-                return Ok(None);
-            };
-            let range = doc.find_function_name_range(func)?;
-
-            if token_position <= range.end && token_position >= range.start {
-                return Ok(Some(GotoDefinitionResponse::from(Location::new(
-                    uri.clone(),
-                    range,
-                ))));
-            }
-            return Ok(None);
-        };
-
-        match call.name() {
-            simplicityhl::parse::CallName::Custom(func) => {
-                let Some(function) = doc.functions.get_func(func.as_inner()) else {
-                    return Ok(None);
-                };
-
-                let Some(source_file) = doc.sources.get(function.span().file_id) else {
-                    return Ok(None);
-                };
-
-                let (start, end) = span_to_positions(function.as_ref(), &source_file.text)?;
-
-                Ok(Some(GotoDefinitionResponse::from(Location::new(
-                    source_file.uri.clone(),
-                    Range::new(start, end),
-                ))))
-            }
-            _ => Ok(None),
-        }
+        Ok(doc.definition_at(uri, params.text_document_position_params.position)?)
     }
 
     async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
