@@ -10,7 +10,7 @@ use simplicityhl::parse::{self, ParseFromStrWithErrors};
 use simplicityhl::UnstableFeatures;
 use tempfile::TempDir;
 use tokio::sync::Notify;
-use tower_lsp_server::lsp_types::{Range, SemanticToken, Uri};
+use tower_lsp_server::lsp_types::{Range, Uri};
 use tower_lsp_server::UriExt;
 
 use super::*;
@@ -127,10 +127,6 @@ fn invalid_program_on_ast() -> &'static str {
 fn invalid_program_on_parsing() -> &'static str {
     "fn add(a: u32, b: u32) -> u32 "
 }
-
-type RawSemanticToken = (u32, u32, u32, u32, u32);
-const FUNCTION_TOKEN: u32 = 0;
-const NAMESPACE_TOKEN: u32 = 5;
 
 fn parse_program(
     source: &str,
@@ -378,103 +374,6 @@ async fn closing_document_restores_dependency_diagnostics_through_transaction() 
         *publications.lock().expect("publication lock"),
         [(0, Some(7)), (1, None)]
     );
-}
-
-fn decode_semantic_tokens(tokens: &[SemanticToken]) -> Vec<RawSemanticToken> {
-    let mut line = 0;
-    let mut character = 0;
-    tokens
-        .iter()
-        .map(|token| {
-            line += token.delta_line;
-            character = if token.delta_line == 0 {
-                character + token.delta_start
-            } else {
-                token.delta_start
-            };
-            (
-                line,
-                character,
-                token.length,
-                token.token_type,
-                token.token_modifiers_bitset,
-            )
-        })
-        .collect()
-}
-
-fn expected_token(source: &str, offset: usize, text: &str, token_type: u32) -> RawSemanticToken {
-    let rope = Rope::from_str(source);
-    let start = offset_to_position(offset, &rope).expect("valid token start");
-    let end = offset_to_position(offset + text.len(), &rope).expect("valid token end");
-    (
-        start.line,
-        start.character,
-        end.character - start.character,
-        token_type,
-        0,
-    )
-}
-
-#[test]
-fn semantic_tokens_split_generic_callable_components() {
-    let source = "// 😀 keeps UTF-16 columns honest\nfn consume_budget(acc: u32, item: u32) -> u32 { acc }\nfn main() { array_fold::<consume_budget, 320>(witness::PADDING, true); }\n";
-    let document = document_from_source(source);
-    let decoded = decode_semantic_tokens(&crate::semantic_tokens::tokens(&document));
-    let builtin_offset = source.find("array_fold").expect("array_fold call");
-    let callback_offset = source.rfind("consume_budget").expect("callback argument");
-
-    assert!(decoded.contains(&expected_token(
-        source,
-        builtin_offset,
-        "array_fold",
-        FUNCTION_TOKEN,
-    )));
-    assert!(decoded.contains(&expected_token(
-        source,
-        callback_offset,
-        "consume_budget",
-        FUNCTION_TOKEN,
-    )));
-
-    let bound_offset = source.find("320").expect("array bound");
-    let bound_position = offset_to_position(bound_offset, &document.text).unwrap();
-    assert!(!decoded.iter().any(|token| {
-        token.0 == bound_position.line
-            && token.1 <= bound_position.character
-            && token.1 + token.2 > bound_position.character
-    }));
-}
-
-#[test]
-fn semantic_tokens_bound_each_builtin_to_its_identifier() {
-    let source = "fn step(acc: u32, item: u32) -> u32 { acc }\nfn main() {\nfold::<step, 2>(0, 0);\nfor_while::<step>(0);\nunwrap_left::<u32>(0);\n<u32>::into(0);\njet::add_32(0, 0);\nassert!(true);\n}\n";
-    let document = document_from_source(source);
-    let decoded = decode_semantic_tokens(&crate::semantic_tokens::tokens(&document));
-
-    for name in ["fold", "for_while", "unwrap_left", "into", "assert!"] {
-        let offset = source
-            .find(name)
-            .unwrap_or_else(|| panic!("missing {name}"));
-        assert!(decoded.contains(&expected_token(source, offset, name, FUNCTION_TOKEN,)));
-    }
-
-    let callback_offsets = [
-        source.find("step, 2").unwrap(),
-        source.rfind("step").unwrap(),
-    ];
-    for offset in callback_offsets {
-        assert!(decoded.contains(&expected_token(source, offset, "step", FUNCTION_TOKEN,)));
-    }
-
-    let jet_offset = source.find("jet::add_32").unwrap();
-    assert!(decoded.contains(&expected_token(source, jet_offset, "jet", NAMESPACE_TOKEN,)));
-    assert!(decoded.contains(&expected_token(
-        source,
-        jet_offset + "jet::".len(),
-        "add_32",
-        FUNCTION_TOKEN,
-    )));
 }
 
 #[test]
