@@ -5,20 +5,22 @@ use std::sync::Arc;
 
 use tower_lsp_server::lsp_types::{Diagnostic, Uri};
 
-use self::diagnostics::DiagnosticBundle;
 use crate::analysis::AnalysisSnapshot;
 use crate::navigation::FunctionIdentity;
+
+use self::diagnostics::DiagnosticBundle;
 
 #[derive(Debug)]
 struct RootAnalysis {
     snapshot: AnalysisSnapshot,
     diagnostics: DiagnosticBundle,
+    generation: Option<AnalysisGeneration>,
+    version: Option<i32>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct DocumentState {
     generation: u64,
-    open: bool,
     text: Option<Arc<str>>,
     version: Option<i32>,
 }
@@ -66,7 +68,6 @@ impl WorkspaceState {
         let text = Arc::<str>::from(text);
         let state = self.documents.entry(uri.clone()).or_default();
         state.generation = state.generation.wrapping_add(1);
-        state.open = true;
         state.text = Some(Arc::clone(&text));
         state.version = version;
         AnalysisInput {
@@ -84,9 +85,7 @@ impl WorkspaceState {
         version: Option<i32>,
     ) -> Option<AnalysisInput> {
         let state = self.documents.get_mut(uri)?;
-        if !state.open {
-            return None;
-        }
+        state.text.as_ref()?;
         if matches!(
             (version, state.version),
             (Some(incoming), Some(current)) if incoming < current
@@ -112,15 +111,7 @@ impl WorkspaceState {
         self.documents
             .iter_mut()
             .filter_map(|(uri, state)| {
-                if !state.open {
-                    return None;
-                }
-                let text = Arc::clone(
-                    state
-                        .text
-                        .as_ref()
-                        .expect("open documents retain their source text"),
-                );
+                let text = Arc::clone(state.text.as_ref()?);
                 state.generation = state.generation.wrapping_add(1);
                 Some(AnalysisInput {
                     uri: uri.clone(),
@@ -134,11 +125,8 @@ impl WorkspaceState {
 
     pub(crate) fn begin_close(&mut self, uri: &Uri) -> Option<AnalysisGeneration> {
         let state = self.documents.get_mut(uri)?;
-        if !state.open {
-            return None;
-        }
+        state.text.as_ref()?;
         state.generation = state.generation.wrapping_add(1);
-        state.open = false;
         state.text = None;
         state.version = None;
         Some(state.generation)
@@ -147,7 +135,7 @@ impl WorkspaceState {
     fn is_current(&self, uri: &Uri, generation: AnalysisGeneration, open: bool) -> bool {
         self.documents
             .get(uri)
-            .is_some_and(|state| state.generation == generation && state.open == open)
+            .is_some_and(|state| state.generation == generation && state.text.is_some() == open)
     }
 
     pub(crate) fn replace_if_current(
@@ -157,8 +145,9 @@ impl WorkspaceState {
         incoming_version: Option<i32>,
         generation: AnalysisGeneration,
     ) -> Option<Vec<DiagnosticUpdate>> {
-        self.is_current(origin, generation, true)
-            .then(|| self.replace_inner(origin, snapshot, incoming_version))
+        self.is_current(origin, generation, true).then(|| {
+            self.replace_inner_with_generation(origin, snapshot, incoming_version, Some(generation))
+        })
     }
 
     pub(crate) fn remove_if_current(
@@ -208,13 +197,13 @@ impl WorkspaceState {
         locations
     }
 
-    fn replace_inner(
+    fn replace_inner_with_generation(
         &mut self,
         origin: &Uri,
-        mut snapshot: AnalysisSnapshot,
+        snapshot: AnalysisSnapshot,
         version: Option<i32>,
+        generation: Option<AnalysisGeneration>,
     ) -> Vec<DiagnosticUpdate> {
-        snapshot.version = version;
         let diagnostics = DiagnosticBundle::from_snapshot(&snapshot);
         let mut affected = self
             .roots
@@ -230,6 +219,8 @@ impl WorkspaceState {
             RootAnalysis {
                 snapshot,
                 diagnostics,
+                generation,
+                version,
             },
         );
         self.updates(affected, Some((origin, version)))
@@ -254,14 +245,32 @@ impl WorkspaceState {
         affected.dedup();
         affected
             .into_iter()
-            .map(|uri| DiagnosticUpdate {
-                diagnostics: self.diagnostics_for(&uri),
-                version: direct
+            .filter_map(|uri| {
+                if self.direct_analysis_is_pending(&uri) {
+                    return None;
+                }
+                let version = direct
                     .filter(|(direct_uri, _)| *direct_uri == &uri)
-                    .and_then(|(_, version)| version),
-                uri,
+                    .and_then(|(_, version)| version)
+                    .or_else(|| self.roots.get(&uri).and_then(|root| root.version));
+                Some(DiagnosticUpdate {
+                    diagnostics: self.diagnostics_for(&uri),
+                    version,
+                    uri,
+                })
             })
             .collect()
+    }
+
+    fn direct_analysis_is_pending(&self, target: &Uri) -> bool {
+        let Some(document) = self.documents.get(target) else {
+            return false;
+        };
+        match (&document.text, self.roots.get(target)) {
+            (Some(_), Some(root)) => root.generation != Some(document.generation),
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        }
     }
 
     fn diagnostics_for(&self, target: &Uri) -> Vec<Diagnostic> {

@@ -20,7 +20,8 @@ fn imports_enabled() -> Settings {
 }
 
 fn analyze(source: &str, path: &Path, root: &Path) -> AnalysisSnapshot {
-    AnalysisSnapshot::analyze(source, path, &imports_enabled(), &[root.to_path_buf()])
+    let path = std::fs::canonicalize(path).expect("canonical analysis path");
+    AnalysisSnapshot::analyze(source, &path, &imports_enabled(), &[root.to_path_buf()])
 }
 
 fn update_for<'a>(updates: &'a [DiagnosticUpdate], uri: &Uri) -> &'a DiagnosticUpdate {
@@ -40,8 +41,17 @@ fn temporary_uri(name: &str) -> Uri {
 
 fn insert_analysis(state: &mut WorkspaceState, source: &str, path: &Path, root: &Path) -> Uri {
     let uri = canonical_uri(path);
-    state.replace_inner(&uri, analyze(source, path, root), Some(1));
+    replace_analysis(state, &uri, analyze(source, path, root), Some(1));
     uri
+}
+
+fn replace_analysis(
+    state: &mut WorkspaceState,
+    uri: &Uri,
+    snapshot: AnalysisSnapshot,
+    version: Option<i32>,
+) -> Vec<DiagnosticUpdate> {
+    state.replace_inner_with_generation(uri, snapshot, version, None)
 }
 
 #[test]
@@ -333,7 +343,6 @@ fn pre_close_reanalysis_cannot_overwrite_a_reopened_document() {
         state.get(&uri).expect("reopened analysis").text.to_string(),
         new_source
     );
-    assert_eq!(state.get(&uri).expect("reopened analysis").version, Some(1));
 }
 
 #[test]
@@ -358,7 +367,6 @@ fn closing_document_releases_its_buffer_payload() {
     state.begin_close(&uri).expect("close ticket");
 
     let document = state.documents.get(&uri).expect("generation tombstone");
-    assert!(!document.open);
     assert!(document.text.is_none());
     assert_eq!(document.version, None);
     assert!(state.begin_close(&uri).is_none());
@@ -392,7 +400,8 @@ fn shared_dependencies_deduplicate_and_open_buffers_take_precedence() {
             .expect("root URI");
     let mut state = WorkspaceState::default();
 
-    let updates = state.replace_inner(
+    let updates = replace_analysis(
+        &mut state,
         &first_root_uri,
         analyze(root_source, &root_a, root),
         Some(1),
@@ -402,7 +411,8 @@ fn shared_dependencies_deduplicate_and_open_buffers_take_precedence() {
     assert_eq!(imported.version, None);
     assert_eq!(imported.diagnostics.len(), 1);
 
-    let updates = state.replace_inner(
+    let updates = replace_analysis(
+        &mut state,
         &second_root_uri,
         analyze(root_source, &root_b, root),
         Some(1),
@@ -412,7 +422,8 @@ fn shared_dependencies_deduplicate_and_open_buffers_take_precedence() {
     // The buffer differs from the saved dependency used by both roots. Its direct clean
     // analysis is authoritative until that document closes.
     let clean_dependency = "pub fn broken() -> u32 { 0 }\n";
-    let updates = state.replace_inner(
+    let updates = replace_analysis(
+        &mut state,
         &dependency_uri,
         analyze(clean_dependency, &dependency_path, root),
         Some(7),
@@ -425,6 +436,72 @@ fn shared_dependencies_deduplicate_and_open_buffers_take_precedence() {
     let restored = update_for(&updates, &dependency_uri);
     assert_eq!(restored.version, None);
     assert_eq!(restored.diagnostics.len(), 1);
+}
+
+#[test]
+fn pending_open_buffer_analysis_suppresses_cross_root_republication() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    write(root.join("Simplex.toml"), "");
+    let dependency_path = root.join("simf/shared.simf");
+    let broken_dependency = "pub fn broken() -> u32 { false }\n";
+    write(&dependency_path, broken_dependency);
+    let root_source = "use crate::shared::broken;\nfn main() { broken(); }\n";
+    let root_path = root.join("simf/main.simf");
+    write(&root_path, root_source);
+    let root_uri = canonical_uri(&root_path);
+    let dependency_uri = canonical_uri(&dependency_path);
+    let clean_dependency = "pub fn broken() -> u32 { 0 }\n";
+    let mut state = WorkspaceState::default();
+
+    let root_open = state.begin_open(&root_uri, root_source, Some(1));
+    state
+        .replace_if_current(
+            &root_uri,
+            analyze(root_source, &root_path, root),
+            root_open.version,
+            root_open.generation,
+        )
+        .expect("root analysis");
+    let dependency_open = state.begin_open(&dependency_uri, clean_dependency, Some(1));
+    state
+        .replace_if_current(
+            &dependency_uri,
+            analyze(clean_dependency, &dependency_path, root),
+            dependency_open.version,
+            dependency_open.generation,
+        )
+        .expect("dependency analysis");
+
+    let pending = state
+        .begin_change(&dependency_uri, clean_dependency, Some(2))
+        .expect("pending dependency analysis");
+    let root_change = state
+        .begin_change(&root_uri, root_source, Some(2))
+        .expect("root change");
+    let cross_root_updates = state
+        .replace_if_current(
+            &root_uri,
+            analyze(root_source, &root_path, root),
+            root_change.version,
+            root_change.generation,
+        )
+        .expect("root reanalysis");
+    assert!(!cross_root_updates
+        .iter()
+        .any(|update| update.uri == dependency_uri));
+
+    let current = state
+        .replace_if_current(
+            &dependency_uri,
+            analyze(clean_dependency, &dependency_path, root),
+            pending.version,
+            pending.generation,
+        )
+        .expect("current dependency analysis");
+    let dependency = update_for(&current, &dependency_uri);
+    assert_eq!(dependency.version, Some(2));
+    assert!(dependency.diagnostics.is_empty());
 }
 
 #[test]

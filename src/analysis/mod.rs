@@ -31,8 +31,6 @@ pub struct AnalysisSnapshot {
     pub use_declarations: Vec<parse::UseDecl>,
     pub sources: SourceSet,
     pub text: Rope,
-    /// Document version retained until version ownership moves into workspace state.
-    pub version: Option<i32>,
     pub compiler_diagnostics: Vec<CompilerDiagnostic>,
     call_scopes: HashMap<Span, Arc<HashMap<String, parse::Function>>>,
 }
@@ -44,7 +42,6 @@ impl AnalysisSnapshot {
             use_declarations: Vec::new(),
             sources: SourceSet::root(uri, text.clone()),
             text,
-            version: None,
             compiler_diagnostics: Vec::new(),
             call_scopes: HashMap::new(),
         }
