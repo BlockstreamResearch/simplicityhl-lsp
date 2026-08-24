@@ -17,7 +17,67 @@ use super::*;
 use crate::analysis::AnalysisSnapshot;
 use crate::config::Settings;
 use crate::text::{offset_to_position, span_to_positions};
-use crate::workspace::{DiagnosticUpdate, WorkspaceState};
+use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
+
+type WitnessPublications = StdArc<StdMutex<Vec<(Option<i32>, Vec<String>)>>>;
+
+async fn capture_witness_update(
+    transaction: &DiagnosticTransaction,
+    workspace: &RwLock<WorkspaceState>,
+    input: AnalysisInput,
+    publications: &WitnessPublications,
+) {
+    let diagnostics = crate::witness::validate(&input.text);
+    transaction
+        .run(
+            workspace,
+            |workspace| {
+                workspace.diagnostics_if_current(
+                    input.uri,
+                    diagnostics,
+                    input.version,
+                    input.generation,
+                )
+            },
+            {
+                let publications = StdArc::clone(publications);
+                move |updates| async move {
+                    let update = &updates[0];
+                    publications.lock().unwrap().push((
+                        update.version,
+                        update
+                            .diagnostics
+                            .iter()
+                            .map(|item| item.message.clone())
+                            .collect(),
+                    ));
+                }
+            },
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn stale_witness_diagnostics_cannot_overwrite_a_newer_generation() {
+    let uri = Uri::from_file_path(std::env::temp_dir().join("contract.wit")).unwrap();
+    let workspace = RwLock::new(WorkspaceState::default());
+    let transaction = DiagnosticTransaction::default();
+    let publications = StdArc::new(StdMutex::new(Vec::new()));
+    let invalid = r#"{"amount":{"value":1}}"#;
+    let stale = workspace.write().await.begin_open(&uri, invalid, Some(1));
+
+    let valid = r#"{"amount":{"value":1,"type":"u32"}}"#;
+    let current = workspace
+        .write()
+        .await
+        .begin_change(&uri, valid, Some(2))
+        .expect("open witness change");
+    capture_witness_update(&transaction, &workspace, current, &publications).await;
+    capture_witness_update(&transaction, &workspace, stale, &publications).await;
+
+    assert!(workspace.read().await.get(&uri).is_none());
+    assert_eq!(*publications.lock().unwrap(), [(Some(2), Vec::new())]);
+}
 
 /// `parse_program` resolves imports from the project the file lives in, so tests
 /// need a real path on disk rather than a placeholder.

@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
-    CompletionItem, CompletionParams, CompletionResponse, Diagnostic, DidChangeConfigurationParams,
+    CompletionItem, CompletionParams, CompletionResponse, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
@@ -26,7 +26,6 @@ use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
 use crate::text::{
     get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
 };
-use crate::utils::find_key_position;
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
 use super::capabilities::{initialize_result, watched_files, workspace_roots};
@@ -578,7 +577,9 @@ impl Backend {
 
     /// Validate witness (.wit) files
     async fn on_change_witness(&self, params: AnalysisInput) {
-        let diagnostics = validate_witness_file(&params.text);
+        // Parsing is input-dependent work. Keep it outside the global diagnostic gate and
+        // workspace write lock; the generation check below safely discards stale results.
+        let diagnostics = crate::witness::validate(&params.text);
         self.run_diagnostic_transaction(|workspace| {
             workspace.diagnostics_if_current(
                 params.uri.clone(),
@@ -589,69 +590,4 @@ impl Backend {
         })
         .await;
     }
-}
-
-/// Validate a witness (.wit) file and return diagnostics.
-fn validate_witness_file(text: &str) -> Vec<Diagnostic> {
-    let mut diagnostics = Vec::new();
-
-    let json: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(e) => {
-            let line = u32::try_from(e.line().saturating_sub(1)).unwrap_or(0);
-            let col = u32::try_from(e.column().saturating_sub(1)).unwrap_or(0);
-            diagnostics.push(Diagnostic::new_simple(
-                Range::new(
-                    tower_lsp_server::lsp_types::Position::new(line, col),
-                    tower_lsp_server::lsp_types::Position::new(line, col + 1),
-                ),
-                format!("JSON syntax error: {e}"),
-            ));
-            return diagnostics;
-        }
-    };
-
-    let Some(obj) = json.as_object() else {
-        diagnostics.push(Diagnostic::new_simple(
-            Range::new(
-                tower_lsp_server::lsp_types::Position::new(0, 0),
-                tower_lsp_server::lsp_types::Position::new(0, 1),
-            ),
-            "Witness file must be a JSON object".to_string(),
-        ));
-        return diagnostics;
-    };
-
-    for (name, value) in obj {
-        let Some(witness_obj) = value.as_object() else {
-            // Find approximate position for this key
-            if let Some(pos) = find_key_position(text, name) {
-                diagnostics.push(Diagnostic::new_simple(
-                    Range::new(pos, pos),
-                    format!("Witness '{name}' must be an object with 'value' and 'type' fields"),
-                ));
-            }
-            continue;
-        };
-
-        if !witness_obj.contains_key("value") {
-            if let Some(pos) = find_key_position(text, name) {
-                diagnostics.push(Diagnostic::new_simple(
-                    Range::new(pos, pos),
-                    format!("Witness '{name}' is missing required 'value' field"),
-                ));
-            }
-        }
-
-        if !witness_obj.contains_key("type") {
-            if let Some(pos) = find_key_position(text, name) {
-                diagnostics.push(Diagnostic::new_simple(
-                    Range::new(pos, pos),
-                    format!("Witness '{name}' is missing required 'type' field"),
-                ));
-            }
-        }
-    }
-
-    diagnostics
 }

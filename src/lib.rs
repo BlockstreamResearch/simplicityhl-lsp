@@ -10,7 +10,7 @@ mod semantic_tokens;
 mod server;
 mod signature_help;
 mod text;
-mod utils;
+mod witness;
 mod workspace;
 
 use server::Backend;
