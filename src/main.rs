@@ -6,7 +6,6 @@ mod completion;
 mod config;
 mod diagnostics;
 mod error;
-mod function;
 mod imports;
 mod navigation;
 mod project;

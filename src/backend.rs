@@ -1401,7 +1401,7 @@ mod tests {
         );
         assert!(err.is_empty(), "Expected no parsing error, got {err:?}");
         let doc = doc.expect("Expected Some(Document)");
-        assert_eq!(doc.functions.map.len(), 2);
+        assert_eq!(doc.functions.iter().count(), 2);
     }
 
     #[test]
