@@ -928,9 +928,9 @@ dependencies = [
 
 [[package]]
 name = "simplicityhl"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc05eac7d1f37bfbc182566b4dc2f377be783e2f53a193d833fa27392f004898"
+checksum = "6e9483a06afd760e341a3770dc0be007d61a0978c12353dc215ca9f39edd9efc"
 dependencies = [
  "ariadne",
  "base64",

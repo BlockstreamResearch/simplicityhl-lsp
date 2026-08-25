@@ -48,7 +48,9 @@ pub enum ProjectError {
     },
     #[error("Configured Simplex manifest was not found at `{0}`")]
     MissingConfiguredManifest(PathBuf),
-    #[error("Dependency `{name}` in `{manifest}` must set exactly one of `path` or `git`")]
+    #[error(
+        "Dependency `{name}` in `{manifest}` must set exactly one of `path` or `git`; `path` cannot use `rev`/`tag`, and `git` may set at most one of them"
+    )]
     InvalidDependency { name: String, manifest: PathBuf },
     #[error("Git dependency `{name}` from `{url}` is not installed at `{expected}`")]
     MissingGitDependency {
@@ -90,6 +92,8 @@ impl Default for BuildConfig {
 struct DependencyConfig {
     path: Option<String>,
     git: Option<String>,
+    rev: Option<String>,
+    tag: Option<String>,
 }
 
 struct ProjectCollector {
@@ -305,9 +309,22 @@ impl ProjectCollector {
         package_root: &Path,
     ) -> Result<PathBuf, ProjectError> {
         match (&dependency.path, &dependency.git) {
-            (Some(path), None) => canonicalize(&package_root.join(path)),
+            (Some(path), None) if dependency.rev.is_none() && dependency.tag.is_none() => {
+                canonicalize(&package_root.join(path))
+            }
             (None, Some(url)) => {
-                let relative = hashed_repository_path(url)?;
+                let reference = match (&dependency.rev, &dependency.tag) {
+                    (None, None) => None,
+                    (Some(rev), None) => Some(rev.as_str()),
+                    (None, Some(tag)) => Some(tag.as_str()),
+                    (Some(_), Some(_)) => {
+                        return Err(ProjectError::InvalidDependency {
+                            name: name.to_string(),
+                            manifest: package_root.join(SIMPLEX_MANIFEST),
+                        });
+                    }
+                };
+                let relative = hashed_repository_path(url, reference)?;
                 let expected = self
                     .install_root
                     .join(DEFAULT_DEPENDENCY_DIRECTORY)
@@ -318,7 +335,7 @@ impl ProjectCollector {
                     expected,
                 })
             }
-            (Some(_), Some(_)) | (None, None) => Err(ProjectError::InvalidDependency {
+            (_, None) | (Some(_), Some(_)) => Err(ProjectError::InvalidDependency {
                 name: name.to_string(),
                 manifest: package_root.join(SIMPLEX_MANIFEST),
             }),
@@ -421,7 +438,7 @@ pub fn find_manifest(path: &Path) -> Option<PathBuf> {
     start.ancestors().find_map(manifest_in)
 }
 
-fn hashed_repository_path(url: &str) -> Result<PathBuf, ProjectError> {
+fn hashed_repository_path(url: &str, reference: Option<&str>) -> Result<PathBuf, ProjectError> {
     let clean_url = url.strip_suffix(".git").unwrap_or(url);
     let repository_name = clean_url
         .split('/')
@@ -430,7 +447,7 @@ fn hashed_repository_path(url: &str) -> Result<PathBuf, ProjectError> {
         .ok_or_else(|| ProjectError::InvalidGitUrl(url.to_string()))?;
 
     let mut hasher = DefaultHasher::new();
-    url.hash(&mut hasher);
+    format!("{url}@{}", reference.unwrap_or("HEAD")).hash(&mut hasher);
     Ok(PathBuf::from(format!(
         "{repository_name}-{:016x}",
         hasher.finish()
