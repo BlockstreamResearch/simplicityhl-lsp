@@ -1,113 +1,63 @@
-use std::collections::HashSet;
+mod references;
+
+pub(crate) use references::FunctionIdentity;
 
 use miniscript::iter::TreeLike;
 use simplicityhl::parse::{self, CallName};
-use tower_lsp_server::lsp_types::{self, Uri};
+use tower_lsp_server::lsp_types::{self, GotoDefinitionResponse, Location, Position, Range, Uri};
 
 use crate::analysis::AnalysisSnapshot;
 use crate::error::LspError;
-use crate::utils::{get_call_span, offset_to_position, span_contains, span_to_positions};
-
-/// Stable identity for one function definition across independently analyzed roots.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct FunctionIdentity {
-    uri: Uri,
-    start: usize,
-    end: usize,
-}
+use crate::text::{get_call_span, offset_to_position, span_contains, span_to_positions};
 
 impl AnalysisSnapshot {
-    pub(crate) fn function_identity(&self, function: &parse::Function) -> Option<FunctionIdentity> {
-        let span = function.span();
-        let source = self.sources.get(span.file_id)?;
-        Some(FunctionIdentity {
-            uri: source.uri.clone(),
-            start: span.start,
-            end: span.end,
-        })
-    }
-
-    pub fn find_all_references(
+    pub fn definition_at(
         &self,
-        call_name: &CallName,
-    ) -> Result<Vec<lsp_types::Location>, LspError> {
-        self.functions
-            .functions()
-            .iter()
-            .filter_map(|function| {
-                let source = self.sources.get(function.span().file_id)?;
-                Some(
-                    parse::ExprTree::Expression(function.body())
-                        .pre_order_iter()
-                        .filter_map(|expression| match expression {
-                            parse::ExprTree::Call(call) => Some((call, get_call_span(call))),
-                            _ => None,
-                        })
-                        .filter(|(call, _)| call.name() == call_name)
-                        .map(|(_, span)| (span, source))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .map(|(span, source)| {
-                let (start, end) = span_to_positions(&span, &source.text)?;
-                Ok(lsp_types::Location {
-                    range: lsp_types::Range { start, end },
-                    uri: source.uri.clone(),
-                })
-            })
-            .collect()
-    }
+        uri: &Uri,
+        token_position: Position,
+    ) -> Result<Option<GotoDefinitionResponse>, LspError> {
+        let token_span = crate::text::position_to_span(token_position, &self.text)?;
 
-    /// Find calls whose locally visible name resolves to the requested definition.
-    pub(crate) fn find_references_to(
-        &self,
-        target: &FunctionIdentity,
-    ) -> Result<Vec<lsp_types::Location>, LspError> {
-        let mut seen_functions = HashSet::new();
-        self.functions
-            .functions()
-            .iter()
-            .filter_map(|function| {
-                let identity = self.function_identity(function)?;
-                let key = (
-                    identity.uri.as_str().to_owned(),
-                    identity.start,
-                    identity.end,
-                );
-                if !seen_functions.insert(key) {
-                    return None;
-                }
-                let source = self.sources.get(function.span().file_id)?;
-                Some(
-                    parse::ExprTree::Expression(function.body())
-                        .pre_order_iter()
-                        .filter_map(|expression| match expression {
-                            parse::ExprTree::Call(call) => Some((call, get_call_span(call))),
-                            _ => None,
-                        })
-                        .filter(|(call, _)| {
-                            let CallName::Custom(name) = call.name() else {
-                                return false;
-                            };
-                            self.resolve_custom_call(function, name.as_inner())
-                                .and_then(|resolved| self.function_identity(resolved))
-                                .as_ref()
-                                == Some(target)
-                        })
-                        .map(|(_, span)| (span, source))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .map(|(span, source)| {
-                let (start, end) = span_to_positions(&span, &source.text)?;
-                Ok(lsp_types::Location {
-                    range: lsp_types::Range { start, end },
-                    uri: source.uri.clone(),
-                })
-            })
-            .collect()
+        if let Some(function) = self.find_imported_function(token_span) {
+            let Some(source) = self.sources.get(function.span().file_id) else {
+                return Ok(None);
+            };
+            let (start, end) = span_to_positions(function.as_ref(), &source.text)?;
+            return Ok(Some(GotoDefinitionResponse::from(Location::new(
+                source.uri.clone(),
+                Range::new(start, end),
+            ))));
+        }
+
+        let Some(call) = self.find_related_call(token_span) else {
+            let Some(function) = self
+                .functions
+                .iter()
+                .find(|function| span_contains(function.span(), &token_span))
+            else {
+                return Ok(None);
+            };
+            let range = self.find_function_name_range(function)?;
+            return Ok(
+                (token_position >= range.start && token_position <= range.end)
+                    .then(|| GotoDefinitionResponse::from(Location::new(uri.clone(), range))),
+            );
+        };
+
+        let CallName::Custom(name) = call.name() else {
+            return Ok(None);
+        };
+        let Some(function) = self.functions.get_func(name.as_inner()) else {
+            return Ok(None);
+        };
+        let Some(source) = self.sources.get(function.span().file_id) else {
+            return Ok(None);
+        };
+        let (start, end) = span_to_positions(function.as_ref(), &source.text)?;
+        Ok(Some(GotoDefinitionResponse::from(Location::new(
+            source.uri.clone(),
+            Range::new(start, end),
+        ))))
     }
 
     pub fn find_function_name_range(
@@ -225,7 +175,7 @@ impl AnalysisSnapshot {
         &self,
         token_span: simplicityhl::error::Span,
     ) -> Option<&simplicityhl::parse::Call> {
-        let function = self.functions.functions().into_iter().find(|function| {
+        let function = self.functions.iter().find(|function| {
             function.span().file_id == 0 && span_contains(function.span(), &token_span)
         })?;
 
@@ -240,3 +190,6 @@ impl AnalysisSnapshot {
             .last()
     }
 }
+
+#[cfg(test)]
+mod tests;

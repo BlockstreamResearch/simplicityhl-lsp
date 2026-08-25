@@ -119,6 +119,19 @@ mod tests {
     }
 
     #[test]
+    fn empty_wrapped_and_bare_configuration_use_the_same_defaults() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({ "simplicityhl": {} }),
+        ] {
+            assert_eq!(
+                Settings::from_json(value).expect("valid empty settings"),
+                Settings::default()
+            );
+        }
+    }
+
+    #[test]
     fn accepts_vscode_wrapped_configuration() {
         let settings = Settings::from_json(serde_json::json!({
             "simplicityhl": {

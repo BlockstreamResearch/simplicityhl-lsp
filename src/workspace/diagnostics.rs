@@ -1,3 +1,5 @@
+//! Conversion and aggregation inputs for compiler diagnostics owned by workspace state.
+
 use std::collections::HashMap;
 
 use simplicityhl::error::{
@@ -9,7 +11,7 @@ use tower_lsp_server::lsp_types::{
 };
 
 use crate::analysis::AnalysisSnapshot;
-use crate::utils::span_to_positions;
+use crate::text::span_to_positions;
 
 /// Diagnostics produced by one analysis root, grouped by the source that owns each range.
 #[derive(Debug, Default)]
@@ -110,3 +112,6 @@ fn message(diagnostic: &CompilerDiagnostic) -> String {
     }
     message
 }
+
+#[cfg(test)]
+mod tests;

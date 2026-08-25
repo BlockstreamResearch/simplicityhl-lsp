@@ -6,7 +6,7 @@ use tower_lsp_server::lsp_types::{
 };
 
 use crate::analysis::AnalysisSnapshot;
-use crate::utils::span_to_positions;
+use crate::text::span_to_positions;
 
 mod token_type {
     pub const FUNCTION: u32 = 0;
@@ -39,7 +39,7 @@ pub fn tokens(snapshot: &AnalysisSnapshot) -> Vec<SemanticToken> {
         .unwrap_or_default();
     let mut raw_tokens = Vec::new();
 
-    for function in snapshot.functions.functions() {
+    for function in snapshot.functions.iter() {
         if function.span().file_id != 0 {
             continue;
         }
@@ -176,4 +176,126 @@ fn encode(mut tokens: Vec<RawToken>) -> Vec<SemanticToken> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use ropey::Rope;
+    use simplicityhl::error::DiagnosticManager;
+    use simplicityhl::parse::ParseFromStrWithErrors;
+    use simplicityhl::UnstableFeatures;
+
+    use super::*;
+    use crate::text::offset_to_position;
+
+    fn snapshot(source: &str) -> AnalysisSnapshot {
+        let mut diagnostics = DiagnosticManager::new();
+        let program = parse::Program::parse_from_str_with_errors(
+            0,
+            source,
+            &UnstableFeatures::none(),
+            &mut diagnostics,
+        )
+        .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
+        AnalysisSnapshot::from_program(
+            &program,
+            source,
+            &std::env::temp_dir().join("semantic_tokens.simf"),
+        )
+    }
+
+    fn decode(tokens: &[SemanticToken]) -> Vec<RawToken> {
+        let mut line = 0;
+        let mut character = 0;
+        tokens
+            .iter()
+            .map(|token| {
+                line += token.delta_line;
+                character = if token.delta_line == 0 {
+                    character + token.delta_start
+                } else {
+                    token.delta_start
+                };
+                (
+                    line,
+                    character,
+                    token.length,
+                    token.token_type,
+                    token.token_modifiers_bitset,
+                )
+            })
+            .collect()
+    }
+
+    fn expected(source: &str, offset: usize, text: &str, kind: u32) -> RawToken {
+        let rope = Rope::from_str(source);
+        let start = offset_to_position(offset, &rope).expect("valid token start");
+        let end = offset_to_position(offset + text.len(), &rope).expect("valid token end");
+        (
+            start.line,
+            start.character,
+            end.character - start.character,
+            kind,
+            0,
+        )
+    }
+
+    #[test]
+    fn splits_generic_callable_components() {
+        let source = "// 😀 keeps UTF-16 columns honest\nfn consume_budget(acc: u32, item: u32) -> u32 { acc }\nfn main() { array_fold::<consume_budget, 320>(witness::PADDING, true); }\n";
+        let snapshot = snapshot(source);
+        let decoded = decode(&tokens(&snapshot));
+        let builtin = source.find("array_fold").expect("array_fold call");
+        let callback = source.rfind("consume_budget").expect("callback argument");
+
+        assert!(decoded.contains(&expected(
+            source,
+            builtin,
+            "array_fold",
+            token_type::FUNCTION
+        )));
+        assert!(decoded.contains(&expected(
+            source,
+            callback,
+            "consume_budget",
+            token_type::FUNCTION,
+        )));
+
+        let bound = source.find("320").expect("array bound");
+        let bound = offset_to_position(bound, &snapshot.text).unwrap();
+        assert!(!decoded.iter().any(|token| {
+            token.0 == bound.line
+                && token.1 <= bound.character
+                && token.1 + token.2 > bound.character
+        }));
+    }
+
+    #[test]
+    fn bounds_each_builtin_to_its_identifier() {
+        let source = "fn step(acc: u32, item: u32) -> u32 { acc }\nfn main() {\nfold::<step, 2>(0, 0);\nfor_while::<step>(0);\nunwrap_left::<u32>(0);\n<u32>::into(0);\njet::add_32(0, 0);\nassert!(true);\n}\n";
+        let decoded = decode(&tokens(&snapshot(source)));
+
+        for name in ["fold", "for_while", "unwrap_left", "into", "assert!"] {
+            let offset = source
+                .find(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(decoded.contains(&expected(source, offset, name, token_type::FUNCTION,)));
+        }
+
+        for offset in [
+            source.find("step, 2").unwrap(),
+            source.rfind("step").unwrap(),
+        ] {
+            assert!(decoded.contains(&expected(source, offset, "step", token_type::FUNCTION,)));
+        }
+
+        let jet = source.find("jet::add_32").unwrap();
+        assert!(decoded.contains(&expected(source, jet, "jet", token_type::NAMESPACE)));
+        assert!(decoded.contains(&expected(
+            source,
+            jet + "jet::".len(),
+            "add_32",
+            token_type::FUNCTION,
+        )));
+    }
 }
