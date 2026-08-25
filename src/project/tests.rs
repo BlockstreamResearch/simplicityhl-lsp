@@ -103,7 +103,13 @@ fn resolves_simplex_git_install_directory_exactly() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let url = "https://github.com/BlockstreamResearch/simplicityhl-std";
-    let installed = root.join("deps").join(hashed_repository_path(url).unwrap());
+    let installed = root
+        .join("deps")
+        .join(hashed_repository_path(url, None).unwrap());
+    assert_eq!(
+        installed.file_name().unwrap(),
+        "simplicityhl-std-8bc347cc4ed271da"
+    );
     write(
         &root.join(SIMPLEX_MANIFEST),
         &format!("[dependencies]\nstd = {{ git = '{url}' }}\n"),
@@ -123,6 +129,81 @@ fn resolves_simplex_git_install_directory_exactly() {
         context.import_root(&root.join("simf/main.simf"), "std"),
         Some(fs::canonicalize(installed.join("simf")).unwrap().as_path())
     );
+}
+
+#[test]
+fn resolves_simplex_git_install_directories_for_revision_and_tag() {
+    for (field, reference, expected_directory) in [
+        ("rev", "deadbeef", "simplicityhl-std-c7c631fb6d854c6d"),
+        ("tag", "v1.2.3", "simplicityhl-std-38569687e465cad1"),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let url = "https://github.com/BlockstreamResearch/simplicityhl-std";
+        let installed = root
+            .join("deps")
+            .join(hashed_repository_path(url, Some(reference)).unwrap());
+        assert_eq!(installed.file_name().unwrap(), expected_directory);
+        write(
+            &root.join(SIMPLEX_MANIFEST),
+            &format!("[dependencies]\nstd = {{ git = '{url}', {field} = '{reference}' }}\n"),
+        );
+        write(&root.join("simf/main.simf"), "fn main() {}\n");
+        write(&installed.join(SIMPLEX_MANIFEST), "");
+        write(&installed.join("simf/lib.simf"), "pub fn helper() {}\n");
+
+        let context = ProjectContext::discover(
+            &root.join("simf/main.simf"),
+            &ProjectSettings::default(),
+            &[root.to_path_buf()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            context.import_root(&root.join("simf/main.simf"), "std"),
+            Some(fs::canonicalize(installed.join("simf")).unwrap().as_path())
+        );
+    }
+}
+
+#[test]
+fn rejects_conflicting_simplex_git_references() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write(
+        &root.join(SIMPLEX_MANIFEST),
+        "[dependencies]\nstd = { git = 'https://example.com/std', rev = 'deadbeef', tag = 'v1' }\n",
+    );
+    write(&root.join("simf/main.simf"), "fn main() {}\n");
+
+    let error = ProjectContext::discover(
+        &root.join("simf/main.simf"),
+        &ProjectSettings::default(),
+        &[root.to_path_buf()],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ProjectError::InvalidDependency { .. }));
+}
+
+#[test]
+fn rejects_git_references_on_path_dependencies() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write(
+        &root.join(SIMPLEX_MANIFEST),
+        "[dependencies]\nstd = { path = 'vendor/std', rev = 'deadbeef' }\n",
+    );
+    write(&root.join("simf/main.simf"), "fn main() {}\n");
+
+    let error = ProjectContext::discover(
+        &root.join("simf/main.simf"),
+        &ProjectSettings::default(),
+        &[root.to_path_buf()],
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ProjectError::InvalidDependency { .. }));
 }
 
 #[test]
