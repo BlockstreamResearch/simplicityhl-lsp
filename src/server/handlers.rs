@@ -17,12 +17,13 @@ use tower_lsp_server::lsp_types::{
 use tower_lsp_server::{LanguageServer, UriExt};
 
 use simplicityhl::parse;
+use smplx_build::CONFIG_FILENAME;
 
 use crate::analysis::AnalysisSnapshot;
 use crate::completion;
 use crate::completion::imports::{self, ImportCompletionContext};
 use crate::config::Settings;
-use crate::project::{ProjectContext, SIMPLEX_MANIFEST};
+use crate::project::ProjectContext;
 use crate::text::{
     get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
 };
@@ -128,7 +129,7 @@ impl LanguageServer for Backend {
                 path.extension().is_some_and(|ext| ext == "simf")
                     || path
                         .file_name()
-                        .is_some_and(|name| name.eq_ignore_ascii_case(SIMPLEX_MANIFEST))
+                        .is_some_and(|name| name.eq_ignore_ascii_case(CONFIG_FILENAME))
             })
         });
         if relevant {

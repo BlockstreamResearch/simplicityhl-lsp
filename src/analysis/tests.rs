@@ -1,13 +1,17 @@
-use super::*;
-use crate::workspace::WorkspaceState;
 use simplicityhl::error::Location as CompilerLocation;
 use simplicityhl::UnstableFeatures;
+use smplx_build::CONFIG_FILENAME;
 use tempfile::TempDir;
+
+use super::*;
+
+use crate::workspace::WorkspaceState;
 
 fn temp_project(source: &str) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
-    std::fs::write(temp.path().join("Simplex.toml"), "").expect("write manifest");
+    std::fs::write(temp.path().join(CONFIG_FILENAME), "").expect("write manifest");
     std::fs::create_dir(temp.path().join("simf")).expect("create source dir");
+
     let path = temp.path().join("simf/main.simf");
     std::fs::write(&path, source).expect("write source");
     (temp, path)
@@ -45,11 +49,13 @@ fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
     let temp = tempfile::TempDir::new().unwrap();
     let source_directory = temp.path().join("simf");
     std::fs::create_dir(&source_directory).unwrap();
-    std::fs::write(temp.path().join("Simplex.toml"), "").unwrap();
+    std::fs::write(temp.path().join(CONFIG_FILENAME), "").unwrap();
+
     let path = source_directory.join("verifier.simf");
     let renamed = source_directory.join("renamed.simf");
     let source = "fn main() {}\n";
     std::fs::write(&path, source).unwrap();
+
     let roots = [temp.path().to_path_buf()];
     let uri = Uri::from_file_path(&path).unwrap();
 
@@ -105,6 +111,7 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
     let root = temp.path();
     std::fs::create_dir_all(root.join("simf")).unwrap();
     std::fs::create_dir_all(root.join("vendor/library/simf")).unwrap();
+
     std::fs::write(
         root.join("Simplex.toml"),
         "[dependencies]\nlibrary = { path = 'vendor/library' }\n",
@@ -116,9 +123,11 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
         "pub fn verify() {}\n",
     )
     .unwrap();
+
     let path = root.join("simf/main.simf");
     let source = "use library::ops::verify;\nfn main() { verify(); }\n";
     std::fs::write(&path, source).unwrap();
+
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
     }))
@@ -129,9 +138,11 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
     assert!(initial.compiler_diagnostics.is_empty());
     let dependency_source = root.join("vendor/library/simf");
     std::fs::rename(&dependency_source, root.join("vendor/library/simf.moved")).unwrap();
+
     let missing = AnalysisSnapshot::analyze(source, &path, &settings, &roots);
     assert_eq!(missing.text.to_string(), source);
     assert_eq!(missing.sources[0].uri, Uri::from_file_path(&path).unwrap());
+
     let messages = missing
         .compiler_diagnostics
         .iter()

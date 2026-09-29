@@ -2,7 +2,7 @@
 name = "simplicityhl-lsp"
 version = "0.7.5"
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.91.0"
 description = "Language Server Protocol (LSP) server for SimplicityHL."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/BlockstreamResearch/simplicityhl-lsp"
@@ -21,8 +21,6 @@ tokio = { version = "1.47.1", features = [
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.143"
-# Deserialize-only: the server reads Simplex.toml and never writes it.
-toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
 tower-lsp-server = "0.22.1"
 
 env_logger = { version = "0.11.8", default-features = false }
@@ -30,8 +28,11 @@ thiserror = "2.0.17"
 
 ropey = "1.6.1"
 miniscript = "12"
-simplicityhl = { version = "0.7.2", features = ["docs"] }
 nom = "8.0.0"
+simplicityhl = { version = "0.7.2", features = ["docs"] }
+
+# TODO: Update to version 0.0.13 when it becomes available
+smplx-build = { git = "https://github.com/BlockstreamResearch/smplx", branch = "refactor/convenient-lsp-usage" }
 
 [dev-dependencies]
 tempfile = "3.23.0"
@@ -62,4 +63,9 @@ allowed_duplicates = [
     "hashbrown",
     # versions match, but are split across different dependency trees
     "memchr",
+    "proc-macro2",
+    "syn",
+    # version mismatch (0.* and 1.*) within smplx-build: `toml` 0.9 vs `toml_edit` 0.25
+    "toml_datetime",
+    "winnow",
 ]

@@ -1,19 +1,16 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
-use simplicityhl::resolution::{DependencyMap, DependencyMapBuilder};
-use simplicityhl::source::CanonPath;
 use thiserror::Error;
 
-use crate::config::{ManualDependency, ProjectSettings};
+use simplicityhl::resolution::{DependencyMap, DependencyMapBuilder};
+use simplicityhl::source::CanonPath;
 
-pub const SIMPLEX_MANIFEST: &str = "Simplex.toml";
-const SIMPLEX_MANIFEST_LOWERCASE: &str = "simplex.toml";
-const DEFAULT_SOURCE_DIRECTORY: &str = "simf";
-const DEFAULT_DEPENDENCY_DIRECTORY: &str = "deps";
+use smplx_build::config::{Dependency, DEFAULT_DEPENDENCY_DIR};
+use smplx_build::error::BuildError;
+use smplx_build::{ArtifactsResolver, BuildConfig, DependencyConfig, CONFIG_FILENAME};
+
+use crate::config::{ManualDependency, ProjectSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyMapping {
@@ -36,10 +33,10 @@ pub enum ProjectError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("Unable to parse `{path}`: {source}")]
-    Parse {
+    #[error("Invalid Simplex manifest `{path}`: {source}")]
+    Manifest {
         path: PathBuf,
-        source: toml::de::Error,
+        source: Box<BuildError>,
     },
     #[error("Unable to resolve `{path}`: {source}")]
     Canonicalize {
@@ -48,53 +45,20 @@ pub enum ProjectError {
     },
     #[error("Configured Simplex manifest was not found at `{0}`")]
     MissingConfiguredManifest(PathBuf),
-    #[error(
-        "Dependency `{name}` in `{manifest}` must set exactly one of `path` or `git`; `path` cannot use `rev`/`tag`/`branch`, and `git` may set at most one of them"
-    )]
-    InvalidDependency { name: String, manifest: PathBuf },
-    #[error("Git dependency `{name}` from `{url}` is not installed at `{expected}`")]
-    MissingGitDependency {
+    #[error("Unable to resolve dependency `{name}`: {source}")]
+    Dependency {
         name: String,
-        url: String,
-        expected: PathBuf,
+        source: Box<BuildError>,
     },
     #[error("Dependency `{name}` is missing a Simplex manifest in `{root}`")]
     MissingDependencyManifest { name: String, root: PathBuf },
-    #[error("Invalid git dependency URL `{0}`")]
-    InvalidGitUrl(String),
     #[error("Unable to build compiler dependency mappings: {0}")]
     Compiler(String),
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
 struct SimplexConfig {
     build: BuildConfig,
-    dependencies: BTreeMap<String, DependencyConfig>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
-struct BuildConfig {
-    src_dir: String,
-}
-
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            src_dir: DEFAULT_SOURCE_DIRECTORY.to_string(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default)]
-struct DependencyConfig {
-    path: Option<String>,
-    git: Option<String>,
-    rev: Option<String>,
-    tag: Option<String>,
-    branch: Option<String>,
+    dependencies: DependencyConfig,
 }
 
 struct ProjectCollector {
@@ -277,7 +241,11 @@ impl ProjectCollector {
     ) -> Result<(), ProjectError> {
         self.visited.insert(package_root.to_path_buf());
 
-        for (name, dependency) in &config.dependencies {
+        // `DependencyConfig` is a HashMap; sort so diagnostics don't depend on iteration order.
+        let mut dependencies = config.dependencies.inner.iter().collect::<Vec<_>>();
+        dependencies.sort_unstable_by_key(|(name, _)| *name);
+
+        for (name, dependency) in dependencies {
             let dependency_root = self.resolve_dependency(name, dependency, package_root)?;
             let manifest_path = manifest_in(&dependency_root).ok_or_else(|| {
                 ProjectError::MissingDependencyManifest {
@@ -306,46 +274,16 @@ impl ProjectCollector {
     fn resolve_dependency(
         &self,
         name: &str,
-        dependency: &DependencyConfig,
+        dependency: &Dependency,
         package_root: &Path,
     ) -> Result<PathBuf, ProjectError> {
-        match (&dependency.path, &dependency.git) {
-            (Some(path), None)
-                if dependency.rev.is_none()
-                    && dependency.tag.is_none()
-                    && dependency.branch.is_none() =>
-            {
-                canonicalize(&package_root.join(path))
-            }
-            (None, Some(url)) => {
-                let reference = match (&dependency.rev, &dependency.tag, &dependency.branch) {
-                    (None, None, None) => None,
-                    (Some(rev), None, None) => Some(format!("rev={}", rev.as_str())),
-                    (None, Some(tag), None) => Some(format!("tag={}", tag.as_str())),
-                    (None, None, Some(branch)) => Some(format!("branch={}", branch.as_str())),
-                    _ => {
-                        return Err(ProjectError::InvalidDependency {
-                            name: name.to_string(),
-                            manifest: package_root.join(SIMPLEX_MANIFEST),
-                        });
-                    }
-                };
-                let relative = hashed_repository_path(url, reference.as_deref())?;
-                let expected = self
-                    .install_root
-                    .join(DEFAULT_DEPENDENCY_DIRECTORY)
-                    .join(relative);
-                canonicalize(&expected).map_err(|_| ProjectError::MissingGitDependency {
-                    name: name.to_string(),
-                    url: url.clone(),
-                    expected,
-                })
-            }
-            (_, None) | (Some(_), Some(_)) => Err(ProjectError::InvalidDependency {
+        let deps_dir = self.install_root.join(DEFAULT_DEPENDENCY_DIR);
+        ArtifactsResolver::resolve_dep_context(dependency, &to_canon(package_root)?, &deps_dir)
+            .map(|root| root.as_path().to_path_buf())
+            .map_err(|source| ProjectError::Dependency {
                 name: name.to_string(),
-                manifest: package_root.join(SIMPLEX_MANIFEST),
-            }),
-        }
+                source: Box::new(source),
+            })
     }
 }
 
@@ -369,10 +307,15 @@ fn add_manual_dependency(
 }
 
 fn load_manifest(path: &Path) -> Result<SimplexConfig, ProjectError> {
-    let source = read_to_string(path)?;
-    toml::from_str(&source).map_err(|source| ProjectError::Parse {
+    let text = read_to_string(path)?;
+    let invalid = |source| ProjectError::Manifest {
         path: path.to_path_buf(),
-        source,
+        source: Box::new(source),
+    };
+
+    Ok(SimplexConfig {
+        build: BuildConfig::from_source(&text).map_err(invalid)?,
+        dependencies: DependencyConfig::from_source(&text).map_err(invalid)?,
     })
 }
 
@@ -433,7 +376,7 @@ fn manifest_at(path: &Path) -> Option<PathBuf> {
 }
 
 fn manifest_in(directory: &Path) -> Option<PathBuf> {
-    [SIMPLEX_MANIFEST, SIMPLEX_MANIFEST_LOWERCASE]
+    [CONFIG_FILENAME]
         .into_iter()
         .map(|name| directory.join(name))
         .find(|path| path.is_file())
@@ -442,22 +385,6 @@ fn manifest_in(directory: &Path) -> Option<PathBuf> {
 pub fn find_manifest(path: &Path) -> Option<PathBuf> {
     let start = if path.is_dir() { path } else { path.parent()? };
     start.ancestors().find_map(manifest_in)
-}
-
-fn hashed_repository_path(url: &str, reference: Option<&str>) -> Result<PathBuf, ProjectError> {
-    let clean_url = url.strip_suffix(".git").unwrap_or(url);
-    let repository_name = clean_url
-        .split('/')
-        .next_back()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| ProjectError::InvalidGitUrl(url.to_string()))?;
-
-    let mut hasher = DefaultHasher::new();
-    format!("{url}@{}", reference.unwrap_or("HEAD")).hash(&mut hasher);
-    Ok(PathBuf::from(format!(
-        "{repository_name}-{:016x}",
-        hasher.finish()
-    )))
 }
 
 #[cfg(test)]
