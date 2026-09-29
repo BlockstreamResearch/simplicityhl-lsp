@@ -32,7 +32,7 @@ nom = "8.0.0"
 simplicityhl = { version = "0.7.2", features = ["docs"] }
 
 # TODO: Update to version 0.0.13 when it becomes available
-smplx-build = { git = "https://github.com/BlockstreamResearch/smplx", branch = "refactor/convenient-lsp-usage" }
+smplx-build = { git = "https://github.com/BlockstreamResearch/smplx", branch = "refactor/convenient-lsp-usage", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.23.0"
@@ -63,9 +63,6 @@ allowed_duplicates = [
     "hashbrown",
     # versions match, but are split across different dependency trees
     "memchr",
-    "proc-macro2",
-    "syn",
-    # version mismatch (0.* and 1.*) within smplx-build: `toml` 0.9 vs `toml_edit` 0.25
-    "toml_datetime",
+    # version mismatch (0.7.* and 1.*) within `toml` 0.9, used by smplx-build
     "winnow",
 ]
