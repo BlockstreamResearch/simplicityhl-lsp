@@ -47,7 +47,7 @@ impl AnalysisSnapshot {
         let CallName::Custom(name) = call.name() else {
             return Ok(None);
         };
-        let Some(function) = self.functions.get_func(name.as_inner()) else {
+        let Some(function) = self.functions.get_func(name.as_str()) else {
             return Ok(None);
         };
         let Some(source) = self.sources.get(function.span().file_id) else {
@@ -102,7 +102,7 @@ impl AnalysisSnapshot {
                 [
                     (simplicityhl::lexer::Token::Fn, _),
                     (simplicityhl::lexer::Token::Ident(name), span),
-                ] if *name == function.name().as_inner() => Some(*span),
+                ] if *name == function.name().as_str() => Some(*span),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -164,7 +164,7 @@ impl AnalysisSnapshot {
             if selected_original || selected_alias {
                 return self
                     .functions
-                    .get_func(alias.as_ref().unwrap_or(original).as_inner());
+                    .get_func(alias.as_ref().unwrap_or(original).as_str());
             }
         }
         None

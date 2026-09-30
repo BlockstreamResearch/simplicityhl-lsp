@@ -245,7 +245,7 @@ fn candidates_from_items(
 ) -> Vec<Candidate> {
     if let Some((segment, rest)) = inline_segments.split_first() {
         let Some(module) = items.iter().find_map(|item| match item {
-            parse::Item::Module(module) if module.name().as_inner() == segment => Some(module),
+            parse::Item::Module(module) if module.name().as_str() == segment => Some(module),
             _ => None,
         }) else {
             return Vec::new();

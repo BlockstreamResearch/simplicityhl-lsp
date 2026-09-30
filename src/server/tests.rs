@@ -488,7 +488,7 @@ fn library_file_without_main_keeps_definition_metadata() {
         .get(function.span().file_id)
         .expect("current file should always have source metadata");
 
-    assert_eq!(function.name().as_inner(), "helper");
+    assert_eq!(function.name().as_str(), "helper");
     assert_eq!(function.span().file_id, 0);
     assert_eq!(
         source_file.uri,
@@ -515,7 +515,7 @@ fn nested_main_does_not_conflict_with_a_synthetic_entry_point() {
         !errors.iter().any(|diagnostic| {
             matches!(
                 diagnostic.error(),
-                Error::FunctionRedefined { name } if name.as_inner() == "main"
+                Error::FunctionRedefined { name } if name.as_str() == "main"
             )
         }),
         "a nested main must not collide with an injected main: {errors:?}"
@@ -558,9 +558,9 @@ fn use_items_and_aliases_resolve_to_the_imported_definition() {
     let original = imported_at("add as");
     let alias = imported_at("plus,");
     let grouped_item = imported_at("subtract}");
-    assert_eq!(original.name().as_inner(), "add");
-    assert_eq!(alias.name().as_inner(), "add");
-    assert_eq!(grouped_item.name().as_inner(), "subtract");
+    assert_eq!(original.name().as_str(), "add");
+    assert_eq!(alias.name().as_str(), "add");
+    assert_eq!(grouped_item.name().as_str(), "subtract");
     assert!(doc
         .find_imported_function(Span::new(
             0,
@@ -633,10 +633,10 @@ fn nested_and_transitive_reexports_resolve_to_original_definitions() {
     let transitive = imported_at(source.rfind("hash as").expect("transitive import"));
     let transitive_alias = imported_at(source.find("or_hash").expect("transitive alias"));
 
-    assert_eq!(nested.name().as_inner(), "get_root");
-    assert_eq!(nested_alias.name().as_inner(), "hash");
-    assert_eq!(transitive.name().as_inner(), "hash");
-    assert_eq!(transitive_alias.name().as_inner(), "hash");
+    assert_eq!(nested.name().as_str(), "get_root");
+    assert_eq!(nested_alias.name().as_str(), "hash");
+    assert_eq!(transitive.name().as_str(), "hash");
+    assert_eq!(transitive_alias.name().as_str(), "hash");
 
     let definition_uri = |function: &parse::Function| &doc.sources[function.span().file_id].uri;
     let merkle_uri =
@@ -696,7 +696,7 @@ fn function_selection_range_is_inside_its_document_symbol_range() {
     let function = doc
         .functions
         .iter()
-        .find(|function| function.name().as_inner() == "main")
+        .find(|function| function.name().as_str() == "main")
         .expect("main function");
     let (start, end) = span_to_positions(function.span(), &doc.text).unwrap();
     let full_range = Range::new(start, end);
@@ -728,7 +728,7 @@ fn stale_analysis_cannot_produce_an_out_of_bounds_selection_range() {
     let function = doc
         .functions
         .iter()
-        .find(|function| function.name().as_inner() == "main")
+        .find(|function| function.name().as_str() == "main")
         .expect("main function")
         .clone();
 
@@ -841,7 +841,7 @@ fn duplicate_imported_main_points_to_the_import() {
         .find(|error| {
             matches!(
                 error.error(),
-                Error::FunctionRedefined { name } if name.as_inner() == "main"
+                Error::FunctionRedefined { name } if name.as_str() == "main"
             )
         })
         .expect("duplicate main diagnostic");
