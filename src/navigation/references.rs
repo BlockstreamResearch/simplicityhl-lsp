@@ -54,7 +54,7 @@ impl AnalysisSnapshot {
                 let CallName::Custom(name) = call.name() else {
                     return false;
                 };
-                self.resolve_custom_call(function, name.as_inner())
+                self.resolve_custom_call(function, name.as_str())
                     .and_then(|resolved| self.function_identity(resolved))
                     .as_ref()
                     == Some(target)

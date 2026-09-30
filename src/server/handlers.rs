@@ -395,7 +395,7 @@ impl LanguageServer for Backend {
                 )
             }
             parse::CallName::Custom(func) => {
-                let Some((function, function_doc)) = doc.functions.get(func.as_inner()) else {
+                let Some((function, function_doc)) = doc.functions.get(func.as_str()) else {
                     return Ok(None);
                 };
 
@@ -468,7 +468,7 @@ impl LanguageServer for Backend {
         }
 
         let Some(func) = (match call_name {
-            Some(parse::CallName::Custom(name)) => doc.functions.get_func(name.as_inner()),
+            Some(parse::CallName::Custom(name)) => doc.functions.get_func(name.as_str()),
             _ => doc
                 .functions
                 .iter()

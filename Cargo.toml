@@ -16,7 +16,6 @@ tokio = { version = "1.47.1", features = [
     "rt-multi-thread",
     "macros",
     "io-std",
-    "io-util",
     "sync",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -29,10 +28,10 @@ thiserror = "2.0.17"
 ropey = "1.6.1"
 miniscript = "12"
 nom = "8.0.0"
-simplicityhl = { version = "0.7.2", features = ["docs"] }
+simplicityhl = { version = "0.8.0", features = ["docs"] }
 
 # TODO: Update to version 0.0.13 when it becomes available
-smplx-build = { git = "https://github.com/BlockstreamResearch/smplx", branch = "refactor/convenient-lsp-usage", default-features = false }
+smplx-build = { git = "https://github.com/BlockstreamResearch/smplx", branch = "dev", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.23.0"
@@ -65,4 +64,11 @@ allowed_duplicates = [
     "memchr",
     # version mismatch (0.7.* and 1.*) within `toml` 0.9, used by smplx-build
     "winnow",
+    # version mismatch (2.* and 3.*): tracing-attributes (via tower-lsp-server) is still on syn 2
+    "syn",
+    # version mismatch within `elements` 0.27 (via simplicityhl 0.8): it uses the new
+    # rust-bitcoin crates while still depending on `bitcoin` 0.32
+    "bitcoin_hashes",
+    "bitcoin-internals",
+    "hex-conservative",
 ]

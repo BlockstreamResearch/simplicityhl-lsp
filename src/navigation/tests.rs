@@ -59,7 +59,7 @@ fn grouped_items_and_aliases_resolve_to_imported_definitions() {
         let function = snapshot
             .find_imported_function(Span::new(0, offset..offset))
             .expect("imported function");
-        assert_eq!(function.name().as_inner(), expected_name);
+        assert_eq!(function.name().as_str(), expected_name);
         assert_eq!(
             snapshot.sources[function.span().file_id].uri,
             Uri::from_file_path(std::fs::canonicalize(&dependency).unwrap()).unwrap()
@@ -116,7 +116,7 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
     ];
     for (offset, expected_name, expected_path) in cases {
         let function = imported(offset);
-        assert_eq!(function.name().as_inner(), expected_name);
+        assert_eq!(function.name().as_str(), expected_name);
         assert_eq!(
             snapshot.sources[function.span().file_id].uri,
             Uri::from_file_path(std::fs::canonicalize(expected_path).unwrap()).unwrap()

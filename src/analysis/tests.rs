@@ -217,7 +217,7 @@ fn library_without_main_keeps_definition_metadata() {
         .functions
         .get_func(&call.name().to_string())
         .expect("helper definition");
-    assert_eq!(function.name().as_inner(), "helper");
+    assert_eq!(function.name().as_str(), "helper");
     assert_eq!(function.span().file_id, 0);
     assert_eq!(snapshot.sources[0].uri, Uri::from_file_path(path).unwrap());
 }
@@ -235,7 +235,7 @@ fn nested_main_does_not_conflict_with_the_synthetic_entry_point() {
     assert!(!snapshot.compiler_diagnostics.iter().any(|diagnostic| {
         matches!(
             diagnostic.error(),
-            CompilerError::FunctionRedefined { name } if name.as_inner() == "main"
+            CompilerError::FunctionRedefined { name } if name.as_str() == "main"
         )
     }));
     let expected = CompilerError::MainOutOfEntryFile.to_string();
@@ -352,7 +352,7 @@ fn duplicate_imported_mains_point_to_distinct_direct_and_transitive_uses() {
         .find(|diagnostic| {
             matches!(
                 diagnostic.error(),
-                CompilerError::FunctionRedefined { name } if name.as_inner() == "main"
+                CompilerError::FunctionRedefined { name } if name.as_str() == "main"
             )
         })
         .expect("duplicate main diagnostic");
