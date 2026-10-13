@@ -10,7 +10,7 @@ use smplx_build::config::{Dependency, DEFAULT_DEPENDENCY_DIR};
 use smplx_build::error::BuildError;
 use smplx_build::{ArtifactsResolver, BuildConfig, DependencyConfig, CONFIG_FILENAME};
 
-use crate::config::{ManualDependency, ProjectSettings};
+use crate::config::{ManualDependency, ProjectSettings, SimplexSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyMapping {
@@ -50,7 +50,7 @@ pub enum ProjectError {
         name: String,
         source: Box<BuildError>,
     },
-    #[error("Dependency `{name}` is missing a Simplex manifest in `{root}`")]
+    #[error("Dependency `{name}` has no `{expected}` in `{root}`", expected = CONFIG_FILENAME)]
     MissingDependencyManifest { name: String, root: PathBuf },
     #[error("Unable to build compiler dependency mappings: {0}")]
     Compiler(String),
@@ -78,24 +78,7 @@ impl ProjectContext {
             .or_else(|| document_path.parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let manifest_path = if settings.simplex.enabled {
-            if settings.simplex.manifest_path.trim().is_empty() {
-                find_manifest(document_path)
-            } else {
-                let configured = PathBuf::from(settings.simplex.manifest_path.trim());
-                let configured = if configured.is_absolute() {
-                    configured
-                } else {
-                    workspace_root.join(configured)
-                };
-                Some(
-                    manifest_at(&configured)
-                        .ok_or(ProjectError::MissingConfiguredManifest(configured))?,
-                )
-            }
-        } else {
-            None
-        };
+        let manifest_path = locate_manifest(document_path, &settings.simplex, &workspace_root)?;
 
         let (project_root, root_config) = if let Some(manifest_path) = &manifest_path {
             let project_root = canonicalize(
@@ -253,6 +236,7 @@ impl ProjectCollector {
                     root: dependency_root.clone(),
                 }
             })?;
+
             let dependency_config = load_manifest(&manifest_path)?;
             let dependency_source =
                 canonicalize(&dependency_root.join(&dependency_config.build.src_dir))?;
@@ -368,6 +352,29 @@ fn containing_workspace(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
         .cloned()
 }
 
+/// The manifest for `document_path`: the configured one if set, otherwise the nearest one.
+/// `None` when Simplex support is off or no manifest exists.
+fn locate_manifest(
+    document_path: &Path,
+    settings: &SimplexSettings,
+    workspace_root: &Path,
+) -> Result<Option<PathBuf>, ProjectError> {
+    if !settings.enabled {
+        return Ok(None);
+    }
+
+    let configured = settings.manifest_path.trim();
+    if !configured.is_empty() {
+        let configured = workspace_root.join(configured);
+
+        return manifest_at(&configured)
+            .map(Some)
+            .ok_or(ProjectError::MissingConfiguredManifest(configured));
+    }
+
+    Ok(find_manifest(document_path))
+}
+
 fn manifest_at(path: &Path) -> Option<PathBuf> {
     if path.is_file() {
         return Some(path.to_path_buf());
@@ -376,10 +383,7 @@ fn manifest_at(path: &Path) -> Option<PathBuf> {
 }
 
 fn manifest_in(directory: &Path) -> Option<PathBuf> {
-    [CONFIG_FILENAME]
-        .into_iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
+    Some(directory.join(CONFIG_FILENAME)).filter(|path| path.is_file())
 }
 
 pub fn find_manifest(path: &Path) -> Option<PathBuf> {
