@@ -13,7 +13,7 @@ use simplicityhl::error::{
 };
 use simplicityhl::parse::ParseFromStrWithErrors;
 use simplicityhl::source::CanonSourceFile;
-use simplicityhl::{parse, TemplateProgram};
+use simplicityhl::{parse, TemplateAst};
 use tower_lsp_server::lsp_types::Uri;
 use tower_lsp_server::UriExt;
 
@@ -127,15 +127,15 @@ impl AnalysisSnapshot {
         // Add a synthetic main only to the compiler input; all user spans remain unchanged.
         let analysis_source = entry_point::compiler_source(&program, &canonical_source);
 
-        snapshot.compiler_diagnostics = match TemplateProgram::new_with_dep(
+        snapshot.compiler_diagnostics = match TemplateAst::new_with_dep(
             analysis_source,
             &dependencies,
             &unstable_features,
             Box::new(ElementsJetHinter::new()),
         ) {
-            Ok(template_program) => {
-                snapshot.populate_visible_functions(&template_program);
-                template_program.diagnostics().diagnostics().to_vec()
+            Ok(template_ast) => {
+                snapshot.populate_visible_functions(&template_ast);
+                template_ast.diagnostics().diagnostics().to_vec()
             }
             Err(diagnostics) => {
                 if let Some(source_map) = diagnostics.sources() {

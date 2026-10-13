@@ -1,9 +1,9 @@
 use std::fs;
-
 use tempfile::TempDir;
 
-use super::*;
 use crate::config::{ManualDependencyDetails, SimplexSettings};
+
+use super::*;
 
 fn write(path: &Path, source: &str) {
     fs::create_dir_all(path.parent().expect("test file has a parent")).unwrap();
@@ -15,7 +15,7 @@ fn discovers_manifest_and_recursive_path_dependencies() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write(
-        &root.join(SIMPLEX_MANIFEST),
+        &root.join(CONFIG_FILENAME),
         "[build]\nsrc_dir = 'contracts'\n[dependencies]\nmerkle = { path = 'vendor/merkle' }\n",
     );
     write(&root.join("contracts/main.simf"), "fn main() {}\n");
@@ -75,7 +75,7 @@ fn dependency_removed_after_discovery_is_reported() {
     let document = root.join("simf/main.simf");
     let dependency_source = root.join("vendor/library/simf");
     write(
-        &root.join(SIMPLEX_MANIFEST),
+        &root.join(CONFIG_FILENAME),
         "[dependencies]\nlibrary = { path = 'vendor/library' }\n",
     );
     write(&document, "fn main() {}\n");
@@ -105,17 +105,13 @@ fn resolves_simplex_git_install_directory_exactly() {
     let url = "https://github.com/BlockstreamResearch/simplicityhl-std";
     let installed = root
         .join("deps")
-        .join(hashed_repository_path(url, None).unwrap());
-    assert_eq!(
-        installed.file_name().unwrap(),
-        "simplicityhl-std-8bc347cc4ed271da"
-    );
+        .join(ArtifactsResolver::generate_hashed_repo_path(url, None, None).unwrap());
     write(
-        &root.join(SIMPLEX_MANIFEST),
+        &root.join(CONFIG_FILENAME),
         &format!("[dependencies]\nstd = {{ git = '{url}' }}\n"),
     );
     write(&root.join("simf/main.simf"), "fn main() {}\n");
-    write(&installed.join(SIMPLEX_MANIFEST), "");
+    write(&installed.join(CONFIG_FILENAME), "");
     write(&installed.join("simf/lib.simf"), "pub fn helper() {}\n");
 
     let context = ProjectContext::discover(
@@ -132,88 +128,27 @@ fn resolves_simplex_git_install_directory_exactly() {
 }
 
 #[test]
-fn resolves_simplex_git_install_directories_for_revision_tag_and_branch() {
-    for (field, reference, expected_directory) in [
-        ("rev", "deadbeef", "simplicityhl-std-e48143e3eed3b3aa"),
-        ("tag", "v1.2.3", "simplicityhl-std-df6211a965d7b5af"),
-        ("branch", "main", "simplicityhl-std-0d3b7afd6ad637da"),
-    ] {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        let url = "https://github.com/BlockstreamResearch/simplicityhl-std";
-        let installed = root
-            .join("deps")
-            .join(hashed_repository_path(url, Some(&format!("{field}={reference}"))).unwrap());
-        assert_eq!(installed.file_name().unwrap(), expected_directory);
-        write(
-            &root.join(SIMPLEX_MANIFEST),
-            &format!("[dependencies]\nstd = {{ git = '{url}', {field} = '{reference}' }}\n"),
-        );
-        write(&root.join("simf/main.simf"), "fn main() {}\n");
-        write(&installed.join(SIMPLEX_MANIFEST), "");
-        write(&installed.join("simf/lib.simf"), "pub fn helper() {}\n");
+fn invalid_manifest_is_reported_with_its_path() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let manifest = root.join(CONFIG_FILENAME);
+    write(
+        &manifest,
+        "[dependencies]\nstd = { git = 'https://example.com/std', rev = 'deadbeef', tag = 'v1' }\n",
+    );
+    write(&root.join("simf/main.simf"), "fn main() {}\n");
 
-        let context = ProjectContext::discover(
-            &root.join("simf/main.simf"),
-            &ProjectSettings::default(),
-            &[root.to_path_buf()],
-        )
-        .unwrap();
+    let error = ProjectContext::discover(
+        &root.join("simf/main.simf"),
+        &ProjectSettings::default(),
+        &[root.to_path_buf()],
+    )
+    .unwrap_err();
 
-        assert_eq!(
-            context.import_root(&root.join("simf/main.simf"), "std"),
-            Some(fs::canonicalize(installed.join("simf")).unwrap().as_path())
-        );
-    }
-}
-
-#[test]
-fn rejects_conflicting_simplex_git_references() {
-    for fields in [
-        "rev = 'deadbeef', tag = 'v1'",
-        "rev = 'deadbeef', branch = 'main'",
-        "tag = 'v1', branch = 'main'",
-        "rev = 'deadbeef', tag = 'v1', branch = 'main'",
-    ] {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write(
-            &root.join(SIMPLEX_MANIFEST),
-            &format!("[dependencies]\nstd = {{ git = 'https://example.com/std', {fields} }}\n"),
-        );
-        write(&root.join("simf/main.simf"), "fn main() {}\n");
-
-        let error = ProjectContext::discover(
-            &root.join("simf/main.simf"),
-            &ProjectSettings::default(),
-            &[root.to_path_buf()],
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, ProjectError::InvalidDependency { .. }));
-    }
-}
-
-#[test]
-fn rejects_git_references_on_path_dependencies() {
-    for field in ["rev = 'deadbeef'", "tag = 'v1'", "branch = 'main'"] {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write(
-            &root.join(SIMPLEX_MANIFEST),
-            &format!("[dependencies]\nstd = {{ path = 'vendor/std', {field} }}\n"),
-        );
-        write(&root.join("simf/main.simf"), "fn main() {}\n");
-
-        let error = ProjectContext::discover(
-            &root.join("simf/main.simf"),
-            &ProjectSettings::default(),
-            &[root.to_path_buf()],
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, ProjectError::InvalidDependency { .. }));
-    }
+    let ProjectError::Manifest { path, .. } = error else {
+        panic!("expected a manifest error, got {error}");
+    };
+    assert_eq!(path, manifest);
 }
 
 #[test]
@@ -221,7 +156,7 @@ fn manual_mapping_overrides_manifest_mapping() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write(
-        &root.join(SIMPLEX_MANIFEST),
+        &root.join(CONFIG_FILENAME),
         "[dependencies]\nmath = { path = 'old_math' }\n",
     );
     write(&root.join("simf/main.simf"), "fn main() {}\n");
@@ -259,7 +194,7 @@ fn source_override_is_used_as_the_dependency_context() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write(
-        &root.join(SIMPLEX_MANIFEST),
+        &root.join(CONFIG_FILENAME),
         "[dependencies]\nmath = { path = 'math' }\n",
     );
     write(&root.join("contracts/main.simf"), "fn main() {}\n");

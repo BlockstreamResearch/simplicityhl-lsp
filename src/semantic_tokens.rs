@@ -124,10 +124,10 @@ fn call_spans(call: &parse::Call, tokens: &simplicityhl::lexer::Tokens<'_>) -> V
             .unwrap_or_default(),
         name => {
             let (callable, callable_starts_call, callback) = match name {
-                parse::CallName::Custom(name) => (name.as_inner(), true, None),
-                parse::CallName::Fold(name, _) => ("fold", true, Some(name.as_inner())),
-                parse::CallName::ArrayFold(name, _) => ("array_fold", true, Some(name.as_inner())),
-                parse::CallName::ForWhile(name) => ("for_while", true, Some(name.as_inner())),
+                parse::CallName::Custom(name) => (name.as_str(), true, None),
+                parse::CallName::Fold(name, _) => ("fold", true, Some(name.as_str())),
+                parse::CallName::ArrayFold(name, _) => ("array_fold", true, Some(name.as_str())),
+                parse::CallName::ForWhile(name) => ("for_while", true, Some(name.as_str())),
                 parse::CallName::UnwrapLeft(_) => ("unwrap_left", true, None),
                 parse::CallName::UnwrapRight(_) => ("unwrap_right", true, None),
                 parse::CallName::Unwrap => ("unwrap", true, None),

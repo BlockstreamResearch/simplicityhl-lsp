@@ -3,20 +3,20 @@ use std::sync::Arc;
 
 use simplicityhl::error::Span;
 use simplicityhl::parse;
-use simplicityhl::TemplateProgram;
+use simplicityhl::TemplateAst;
 
 use super::AnalysisSnapshot;
 use crate::text::{get_comments_from_lines, offset_to_position};
 
 impl AnalysisSnapshot {
     /// Add imported functions under the names visible from this root, including aliases.
-    pub(super) fn populate_visible_functions(&mut self, template_program: &TemplateProgram) {
-        let Some(source_map) = template_program.source_map() else {
+    pub(super) fn populate_visible_functions(&mut self, template_ast: &TemplateAst) {
+        let Some(source_map) = template_ast.source_map() else {
             return;
         };
         self.populate_sources(source_map);
 
-        let resolved_program = template_program.resolved_program();
+        let resolved_program = template_ast.resolved_program();
         self.populate_call_scopes(resolved_program);
         for item in resolved_program.items() {
             let parse::Item::Module(module) = item else {
@@ -24,7 +24,7 @@ impl AnalysisSnapshot {
             };
             let Some(0) = module
                 .name()
-                .as_inner()
+                .as_str()
                 .strip_prefix("unit_")
                 .and_then(|id| id.parse::<usize>().ok())
             else {
@@ -38,7 +38,7 @@ impl AnalysisSnapshot {
                 let path = use_decl.path();
                 let Some(target_file_id) = path
                     .get(1)
-                    .and_then(|segment| segment.as_inner().strip_prefix("unit_"))
+                    .and_then(|segment| segment.as_str().strip_prefix("unit_"))
                     .and_then(|id| id.parse::<usize>().ok())
                 else {
                     continue;
@@ -55,7 +55,7 @@ impl AnalysisSnapshot {
                         resolved_program,
                         target_file_id,
                         &path[2..],
-                        original_name.as_inner(),
+                        original_name.as_str(),
                         &mut visited,
                     ) else {
                         continue;
@@ -119,7 +119,7 @@ fn collect_call_scopes(
         let path = use_decl.path();
         let Some(target_file_id) = path
             .get(1)
-            .and_then(|segment| segment.as_inner().strip_prefix("unit_"))
+            .and_then(|segment| segment.as_str().strip_prefix("unit_"))
             .and_then(|id| id.parse::<usize>().ok())
         else {
             continue;
@@ -134,7 +134,7 @@ fn collect_call_scopes(
                 program,
                 target_file_id,
                 &path[2..],
-                original.as_inner(),
+                original.as_str(),
                 &mut visited,
             ) else {
                 continue;
@@ -201,7 +201,7 @@ fn resolve_function<'a>(
 
     let items = module_items(program, file_id, module_path)?;
     if let Some(function) = items.iter().find_map(|item| match item {
-        parse::Item::Function(function) if function.name().as_inner() == name => Some(function),
+        parse::Item::Function(function) if function.name().as_str() == name => Some(function),
         _ => None,
     }) {
         return Some(function);
@@ -216,13 +216,13 @@ fn resolve_function<'a>(
             parse::UseItems::List(items) => items.as_slice(),
         };
         for (original, alias) in imported_items {
-            if alias.as_ref().unwrap_or(original).as_inner() != name {
+            if alias.as_ref().unwrap_or(original).as_str() != name {
                 continue;
             }
             let path = use_decl.path();
             let target_file_id = path
                 .get(1)?
-                .as_inner()
+                .as_str()
                 .strip_prefix("unit_")?
                 .parse::<usize>()
                 .ok()?;
@@ -230,7 +230,7 @@ fn resolve_function<'a>(
                 program,
                 target_file_id,
                 &path[2..],
-                original.as_inner(),
+                original.as_str(),
                 visited,
             ) {
                 return Some(function);
@@ -247,18 +247,20 @@ fn module_items<'a>(
 ) -> Option<&'a [parse::Item]> {
     let unit_name = format!("unit_{file_id}");
     let unit = program.items().iter().find_map(|item| match item {
-        parse::Item::Module(module) if module.name().as_inner() == unit_name => Some(module),
+        parse::Item::Module(module) if module.name().as_str() == unit_name => Some(module),
         _ => None,
     })?;
+
     let mut items = unit.items();
     for segment in module_path {
         let module = items.iter().find_map(|item| match item {
-            parse::Item::Module(module) if module.name().as_inner() == segment.as_inner() => {
+            parse::Item::Module(module) if module.name().as_str() == segment.as_str() => {
                 Some(module)
             }
             _ => None,
         })?;
         items = module.items();
     }
+
     Some(items)
 }

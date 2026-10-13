@@ -35,7 +35,6 @@ pub struct ProjectSettings {
     pub dependencies: BTreeMap<String, ManualDependency>,
 }
 
-// TODO: maybe have a simplex as a dep to avoid code/logic duplication/invalidation
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SimplexSettings {

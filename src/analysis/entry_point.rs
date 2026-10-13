@@ -27,7 +27,7 @@ pub(super) fn compiler_source(
 
 fn items_contain_main(items: &[parse::Item]) -> bool {
     items.iter().any(|item| match item {
-        parse::Item::Function(function) => function.name().as_inner() == "main",
+        parse::Item::Function(function) => function.name().as_str() == "main",
         parse::Item::Module(module) => items_contain_main(module.items()),
         parse::Item::TypeAlias(_)
         | parse::Item::Use(_)
@@ -172,7 +172,7 @@ fn imported_main_spans(
 fn is_duplicate_main(diagnostic: &CompilerDiagnostic) -> bool {
     matches!(
         diagnostic.error(),
-        CompilerError::FunctionRedefined { name } if name.as_inner() == "main"
+        CompilerError::FunctionRedefined { name } if name.as_str() == "main"
     )
 }
 

@@ -51,9 +51,10 @@ defaults below are what the server uses when a client sends nothing.
   syntax. It is off by default because the feature is unstable in the compiler itself.
 - `experimentalFeatures.enums` enables enum declarations and enum match patterns,
   likewise unstable in the compiler.
-- `project.simplex.enabled` looks for the nearest `Simplex.toml` (or `simplex.toml`)
-  in the file's ancestors and honours its `build.src_dir` and `[dependencies]`, resolving
-  path dependencies recursively and locating installed git dependencies under `deps/`.
+- `project.simplex.enabled` looks for the nearest `Simplex.toml` in the file's ancestors
+  and honours its `build.src_dir` and `[dependencies]`, resolving path dependencies
+  recursively and locating installed git dependencies under `deps/`. Like `simplex`, it
+  only reads a file named exactly `Simplex.toml`.
 - `project.simplex.manifestPath` pins an explicit manifest instead of searching. Relative
   values resolve from the containing workspace folder. A path that does not exist is
   reported as a diagnostic rather than silently ignored.
