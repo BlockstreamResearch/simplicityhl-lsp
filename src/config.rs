@@ -16,12 +16,14 @@ pub struct Settings {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ExperimentalFeatures {
     /// Enables `use`, `mod`, `pub`, aliases, and multi-file dependency resolution.
     pub imports: bool,
     /// Enables enum declarations and enum match patterns.
     pub enums: bool,
+    /// Enables the `raw_hash::<T>(tuple)` builtin.
+    pub raw_hash: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -100,6 +102,9 @@ impl Settings {
         if self.experimental_features.enums {
             enabled.push(UnstableFeature::Enums);
         }
+        if self.experimental_features.raw_hash {
+            enabled.push(UnstableFeature::RawHash);
+        }
         UnstableFeatures::new(enabled)
     }
 }
@@ -134,7 +139,7 @@ mod tests {
     fn accepts_vscode_wrapped_configuration() {
         let settings = Settings::from_json(serde_json::json!({
             "simplicityhl": {
-                "experimentalFeatures": { "imports": true, "enums": false },
+                "experimentalFeatures": { "imports": true, "enums": false, "raw_hash": false },
                 "project": {
                     "simplex": { "enabled": true, "manifestPath": "config/Simplex.toml" },
                     "sourceDirectory": "contracts",
@@ -163,7 +168,7 @@ mod tests {
     #[test]
     fn accepts_an_unwrapped_configuration_section() {
         let settings = Settings::from_json(serde_json::json!({
-            "experimentalFeatures": { "imports": true, "enums": true }
+            "experimentalFeatures": { "imports": true, "enums": true, "raw_hash": true },
         }))
         .expect("valid settings");
 

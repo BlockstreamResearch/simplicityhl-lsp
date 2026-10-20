@@ -29,6 +29,7 @@ pub fn get_builtin_functions() -> Vec<FunctionTemplate> {
         CallName::ArrayFold(function_name.clone(), some),
         CallName::ForWhile(function_name.clone()),
         CallName::TypeCast(ty.clone()),
+        CallName::RawHash(ty.clone()),
     ];
 
     functions.iter().filter_map(match_callname).collect()
@@ -112,6 +113,13 @@ pub fn match_callname(call: &CallName) -> Option<FunctionTemplate> {
             vec!["f".to_string()],
             vec!["accumulator: A".to_string(), "context: C".to_string()],
             "Either<B, A>",
+            doc,
+        )),
+        CallName::RawHash(aliased_type) => Some(FunctionTemplate::new(
+            "raw_hash",
+            vec![aliased_type.to_string()],
+            vec![format!("tuple: {aliased_type}")],
+            "u256",
             doc,
         )),
 
@@ -217,6 +225,14 @@ fn main() {
     let out: Either<u8, ()> = for_while::<stop_at_10>((), ());
     assert!(jet::eq_8(10, unwrap_left::<()>(out)));
 }
+```",
+        CallName::RawHash(_) =>
+    "Compute the SHA-256 hash of the concatenated big-endian bytes of a tuple of unsigned integers.\n
+- Signature: `raw_hash::<T>(tuple: T) -> u256`
+- `T` is a tuple of unsigned integers of whole-byte widths (`u8` .. `u256`)
+- Note: unstable, requires the `raw_hash` feature.\n
+```simplicityhl
+let h: u256 = raw_hash::<(u16, u16)>((1, 2));
 ```",
         CallName::TypeCast(_) => type_casting_documentation(),
         CallName::Jet(_) | CallName::Custom(_) => "",
