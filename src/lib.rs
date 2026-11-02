@@ -4,6 +4,7 @@ mod analysis;
 mod completion;
 mod config;
 mod error;
+mod format;
 mod navigation;
 mod project;
 mod semantic_tokens;

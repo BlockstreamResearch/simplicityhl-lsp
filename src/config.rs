@@ -13,6 +13,14 @@ use simplicityhl::{UnstableFeature, UnstableFeatures};
 pub struct Settings {
     pub experimental_features: ExperimentalFeatures,
     pub project: ProjectSettings,
+    pub formatter: FormatterSettings,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct FormatterSettings {
+    /// Explicit `simfmt` binary
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -142,7 +150,8 @@ mod tests {
                         "std": "../std/simf",
                         "math": { "path": "../math/simf", "context": "contracts/lib" }
                     }
-                }
+                },
+                "formatter": { "path": "/opt/simplex/bin/simfmt" }
             }
         }))
         .expect("valid settings");
@@ -158,6 +167,7 @@ mod tests {
             settings.project.dependencies["math"].context(),
             Some("contracts/lib")
         );
+        assert_eq!(settings.formatter.path, "/opt/simplex/bin/simfmt");
     }
 
     #[test]
