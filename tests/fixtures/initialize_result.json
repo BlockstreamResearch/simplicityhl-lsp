@@ -30,6 +30,7 @@
     "definitionProvider": true,
     "referencesProvider": true,
     "documentSymbolProvider": true,
+    "documentFormattingProvider": true,
     "workspace": {
       "workspaceFolders": {
         "supported": true,

@@ -126,6 +126,64 @@ fn incomplete_import_completion_survives_parse_failure_and_respects_the_feature_
     assert!(enabled["error"].is_null(), "{enabled}");
 }
 
+#[cfg(unix)]
+#[test]
+fn formatting_replaces_the_unsaved_buffer_with_simfmt_output() {
+    let root = TempDir::new().expect("workspace");
+    let simfmt = root.path().join("simfmt");
+    let written = std::process::Command::new("sh")
+        .args([
+            "-c",
+            r#"printf '#!/bin/sh\nsed "s/(){/() {/"\n' > "$0" && chmod 755 "$0""#,
+        ])
+        .arg(&simfmt)
+        .status()
+        .expect("fake simfmt");
+    assert!(written.success());
+    let document_uri = file_uri(&root.path().join("main.simf"));
+
+    // Multi-byte text on the last line checks the edit ends at the UTF-16 document end.
+    let source = "fn main(){}\n// 😀";
+    let mut server = LspProcess::spawn();
+    server.initialize(
+        &file_uri(root.path()),
+        &json!({ "simplicityhl": { "formatter": { "path": simfmt } } }),
+    );
+    server.notify(
+        "textDocument/didOpen",
+        &json!({
+            "textDocument": {
+                "uri": document_uri,
+                "languageId": "simplicityhl",
+                "version": 1,
+                "text": source
+            }
+        }),
+    );
+
+    let response = server.request(
+        2,
+        "textDocument/formatting",
+        &json!({
+            "textDocument": { "uri": document_uri },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+
+    assert_eq!(
+        response["result"],
+        json!([{
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 1, "character": 5 }
+            },
+            "newText": "fn main() {}\n// 😀"
+        }]),
+        "{response}"
+    );
+    server.shutdown();
+}
+
 fn assert_diagnostics_use_opened_uri(root: &TempDir, document_uri: &str) {
     let root_uri = file_uri(root.path());
     let source = "fn main() -> u32 { false }\n";
