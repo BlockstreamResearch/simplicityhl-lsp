@@ -52,6 +52,12 @@ pub enum ProjectError {
     },
     #[error("Dependency `{name}` has no `{expected}` in `{root}`", expected = CONFIG_FILENAME)]
     MissingDependencyManifest { name: String, root: PathBuf },
+    #[error("Dependency `{name}` src_dir resolves outside its package: `{source_dir}` (package root: `{root}`)")]
+    DependencySourceOutsidePackage {
+        name: String,
+        root: PathBuf,
+        source_dir: PathBuf,
+    },
     #[error("Unable to build compiler dependency mappings: {0}")]
     Compiler(String),
 }
@@ -240,6 +246,15 @@ impl ProjectCollector {
             let dependency_config = load_manifest(&manifest_path)?;
             let dependency_source =
                 canonicalize(&dependency_root.join(&dependency_config.build.src_dir))?;
+
+            // A dependency may only define import contexts inside its own package.
+            if !dependency_source.starts_with(&dependency_root) {
+                return Err(ProjectError::DependencySourceOutsidePackage {
+                    name: name.clone(),
+                    root: dependency_root,
+                    source_dir: dependency_source,
+                });
+            }
 
             self.mappings.insert(
                 (source_root.to_path_buf(), name.clone()),

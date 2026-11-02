@@ -128,6 +128,34 @@ fn resolves_simplex_git_install_directory_exactly() {
 }
 
 #[test]
+fn dependency_source_outside_its_package_is_rejected() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    write(
+        &root.join(CONFIG_FILENAME),
+        "[dependencies]\nmath = { path = 'vendor/math' }\n",
+    );
+    write(&root.join("simf/main.simf"), "fn main() {}\n");
+    write(
+        &root.join("vendor/math/Simplex.toml"),
+        "[build]\nsrc_dir = '../shared'\n",
+    );
+    write(&root.join("vendor/shared/ops.simf"), "pub fn add() {}\n");
+
+    let error = ProjectContext::discover(
+        &root.join("simf/main.simf"),
+        &ProjectSettings::default(),
+        &[root.to_path_buf()],
+    )
+    .unwrap_err();
+
+    let ProjectError::DependencySourceOutsidePackage { name, .. } = error else {
+        panic!("expected a dependency source error, got {error}");
+    };
+    assert_eq!(name, "math");
+}
+
+#[test]
 fn invalid_manifest_is_reported_with_its_path() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
