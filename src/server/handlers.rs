@@ -1,6 +1,8 @@
+use ropey::Rope;
 use serde_json::Value;
 
 use std::str::FromStr;
+use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
@@ -8,11 +10,12 @@ use tower_lsp_server::lsp_types::{
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, InitializeParams,
-    InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind, MessageType, Range,
-    ReferenceParams, Registration, SemanticTokens, SemanticTokensParams, SemanticTokensResult,
-    SignatureHelp, SignatureHelpParams, SymbolKind, Uri,
+    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    InitializeParams, InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind,
+    MessageType, Position, Range, ReferenceParams, Registration, SemanticTokens,
+    SemanticTokensParams, SemanticTokensResult, SignatureHelp, SignatureHelpParams, SymbolKind,
+    TextEdit, Uri,
 };
 use tower_lsp_server::{LanguageServer, UriExt};
 
@@ -23,9 +26,12 @@ use crate::analysis::AnalysisSnapshot;
 use crate::completion;
 use crate::completion::imports::{self, ImportCompletionContext};
 use crate::config::Settings;
+use crate::error::LspError;
+use crate::format::{self, FormatError};
 use crate::project::ProjectContext;
 use crate::text::{
-    get_call_span, position_to_offset, position_to_span, span_contains, span_to_positions,
+    get_call_span, offset_to_position, position_to_offset, position_to_span, span_contains,
+    span_to_positions,
 };
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
@@ -286,6 +292,54 @@ impl LanguageServer for Backend {
             .collect();
 
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = &params.text_document.uri;
+        let Some(path) = uri.to_file_path() else {
+            return Ok(None);
+        };
+
+        if path.extension().is_none_or(|ext| ext != "simf") {
+            return Ok(None);
+        }
+
+        let Some(text) = self.workspace.read().await.text(uri) else {
+            return Ok(None);
+        };
+
+        let binary = self.config.read().await.settings.formatter.path.clone();
+
+        let path = path.into_owned();
+        let source = Arc::clone(&text);
+        let result = tokio::task::spawn_blocking(move || format::format(&source, &path, &binary))
+            .await
+            .map_err(|error| LspError::Internal(error.to_string()))?;
+
+        match result {
+            Ok(Some(formatted)) => Ok(Some(vec![TextEdit {
+                range: Range {
+                    start: Position::new(0, 0),
+                    end: offset_to_position(text.len(), &Rope::from_str(&text))?,
+                },
+                new_text: formatted,
+            }])),
+            Ok(None) => Ok(Some(Vec::new())),
+            // Syntax errors are already published as diagnostics.
+            // Do not show them again on every format-on-save.
+            Err(error @ FormatError::Failed(_)) => {
+                self.client
+                    .log_message(MessageType::WARNING, error.to_string())
+                    .await;
+                Ok(None)
+            }
+            Err(error) => {
+                self.client
+                    .show_message(MessageType::ERROR, error.to_string())
+                    .await;
+                Ok(None)
+            }
+        }
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
