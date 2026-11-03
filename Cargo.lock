@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "simplicityhl-lsp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "env_logger",
  "miniscript",
@@ -1066,9 +1066,9 @@ checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
 
 [[package]]
 name = "smplx-build"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f886393537eaf341fb389d6cdb5365630d09daf99bcb4b570b228a0cad18dca2"
+checksum = "9c9a9658644c4f02ccbc3b937abe5b4d705bf966a8e3e53bc1cd8e667c388d04"
 dependencies = [
  "serde",
  "simplicityhl",

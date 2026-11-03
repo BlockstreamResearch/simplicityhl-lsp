@@ -59,6 +59,11 @@ impl WorkspaceState {
         self.roots.values().map(|root| &root.snapshot)
     }
 
+    /// Latest text of an open document, including one whose analysis failed.
+    pub(crate) fn text(&self, uri: &Uri) -> Option<Arc<str>> {
+        self.documents.get(uri)?.text.clone()
+    }
+
     pub(crate) fn begin_open(
         &mut self,
         uri: &Uri,

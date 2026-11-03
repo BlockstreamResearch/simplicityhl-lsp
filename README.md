@@ -23,6 +23,8 @@ Language Server for [SimplicityHL language](https://simplicity-lang.org/).
 
 ![goto-definition](assets/goto-definition.gif)
 
+- Document formatting with [`simfmt`](https://github.com/BlockstreamResearch/simfmt), the formatter behind `simplex fmt`
+
 ## Configuration
 
 Editors send settings under the `simplicityhl` section. Every field is optional; the
@@ -42,6 +44,9 @@ defaults below are what the server uses when a client sends nothing.
       },
       "sourceDirectory": "",
       "dependencies": {}
+    },
+    "formatter": {
+      "path": ""
     }
   }
 }
@@ -74,6 +79,11 @@ defaults below are what the server uses when a client sends nothing.
   mapping to files under `context`, matching how the compiler scopes dependencies per
   package.
 
+- `formatter.path` sets the `simfmt` binary used for formatting. If empty, the server
+  looks for `simfmt` next to `simplex` on `PATH`, then in `~/.simplex/bin` (or
+  `$SIMPLEX_DIR/bin`), then anywhere on `PATH`. The nearest `simfmt.toml` applies, same
+  as with `simplex fmt`.
+
 Configuration changes take effect immediately: the server re-analyses open documents on
 `workspace/didChangeConfiguration`, on workspace-folder changes, and when a watched
 `.simf` file or Simplex manifest changes on disk.
@@ -98,20 +108,20 @@ cargo install simplicityhl-lsp
 
 ```lua
 vim.filetype.add({
-	extension = {
-		simf = "simf",
-	},
+  extension = {
+    simf = "simf",
+  },
 })
 
 vim.lsp.config["simplicityhl-lsp"] = {
-	cmd = { "simplicityhl-lsp" },
-	filetypes = { "simf" },
-	settings = {
-		simplicityhl = {
-			experimentalFeatures = { imports = true, enums = false },
-			project = { simplex = { enabled = true, manifestPath = "" } },
-		},
-	},
+  cmd = { "simplicityhl-lsp" },
+  filetypes = { "simf" },
+  settings = {
+    simplicityhl = {
+      experimentalFeatures = { imports = true, enums = false },
+      project = { simplex = { enabled = true, manifestPath = "" } },
+    },
+  },
 }
 vim.lsp.enable("simplicityhl-lsp")
 ```
@@ -132,26 +142,26 @@ Currently, the Language Server does not provide any syntax highlighting on its o
 
 ```lua
 vim.api.nvim_create_autocmd("User", {
-	pattern = "TSUpdate",
-	callback = function()
-		require("nvim-treesitter.parsers").simplicityhl = {
-			install_info = {
-				url = "https://github.com/distributed-lab/tree-sitter-simplicityhl",
-				queries = "queries",
-			},
-			filetype = "simf",
-			tier = 0,
-		}
-	end,
+  pattern = "TSUpdate",
+  callback = function()
+    require("nvim-treesitter.parsers").simplicityhl = {
+      install_info = {
+        url = "https://github.com/distributed-lab/tree-sitter-simplicityhl",
+        queries = "queries",
+      },
+      filetype = "simf",
+      tier = 0,
+    }
+  end,
 })
 
 vim.treesitter.language.register("simplicityhl", { "simf" })
 
 vim.api.nvim_create_autocmd("FileType", {
-	pattern = { "simf" },
-	callback = function()
-		vim.treesitter.start()
-	end,
+  pattern = { "simf" },
+  callback = function()
+    vim.treesitter.start()
+  end,
 })
 ```
 
@@ -164,4 +174,3 @@ vim.api.nvim_create_autocmd("FileType", {
 If everything is working correctly, you should see syntax highlighting in `.simf` files.
 
 **Note:** This method is compatible only with `nvim-treesitter` v0.10 or newer.
-
