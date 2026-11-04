@@ -85,8 +85,10 @@ fn run(
     candidates: &[PathBuf],
 ) -> Result<Output, FormatError> {
     for binary in candidates {
+        // `--quiet` overrides a `verbose` setting in `simfmt.toml`, which would otherwise
+        // prefix the output with a `<stdin>:` header that ends up in the document.
         let child = Command::new(binary)
-            .args(["--emit", "stdout", "--color", "never"])
+            .args(["--emit", "stdout", "--color", "never", "--quiet"])
             .current_dir(working_directory)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -194,7 +196,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unchanged_text_needs_no_edit() {
-        assert_eq!(format_with("cat", "fn main() {}\n").unwrap(), None);
+        // Like `simfmt` with `verbose` in `simfmt.toml`: a `<stdin>:` header unless `--quiet`.
+        let simfmt = r#"case " $* " in *" --quiet "*) ;; *) printf '<stdin>:\n\n' ;; esac; cat"#;
+
+        assert_eq!(format_with(simfmt, "fn main() {}\n").unwrap(), None);
     }
 
     #[cfg(unix)]
