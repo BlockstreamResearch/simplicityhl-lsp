@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "simplicityhl-lsp"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "env_logger",
  "miniscript",
