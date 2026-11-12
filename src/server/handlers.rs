@@ -207,11 +207,16 @@ impl LanguageServer for Backend {
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
 
+        let path = uri.to_file_path();
+        let extension = path.as_deref().and_then(std::path::Path::extension);
+
         // .wit files don't have semantic tokens
-        if std::path::Path::new(uri.path().as_str())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
-        {
+        if extension.is_some_and(|ext| ext.eq_ignore_ascii_case("wit")) {
+            return Ok(None);
+        }
+
+        if extension.is_some_and(|ext| ext.eq_ignore_ascii_case("simpl")) {
+            // TODO: implement semantic token highlight
             return Ok(None);
         }
 
@@ -606,12 +611,16 @@ impl Backend {
             return;
         };
         let path = path_buf.as_ref();
+        let extension = path.extension();
 
-        // Check if this is a witness file
-        if path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
-        {
+        if extension.is_some_and(|ext| ext.eq_ignore_ascii_case("simpl")) {
+            // Raw Simplicity highlighting reads the current buffer directly; diagnostics
+            // are not implemented yet, so do not send it through SimplicityHL analysis.
+            // TODO: implement validation of Simplicity
+            return;
+        }
+
+        if extension.is_some_and(|ext| ext.eq_ignore_ascii_case("wit")) {
             self.on_change_witness(params).await;
             return;
         }
