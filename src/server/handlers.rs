@@ -86,6 +86,7 @@ impl LanguageServer for Backend {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
@@ -143,6 +144,7 @@ impl LanguageServer for Backend {
         }
     }
 
+    #[allow(clippy::unused_async_trait_impl)]
     async fn execute_command(&self, _: ExecuteCommandParams) -> Result<Option<Value>> {
         Ok(None)
     }

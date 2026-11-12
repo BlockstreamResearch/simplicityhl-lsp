@@ -42,7 +42,7 @@ pub fn match_callname(call: &CallName) -> Option<FunctionTemplate> {
             let ty = aliased_type.to_string();
             Some(FunctionTemplate::new(
                 "unwrap_left",
-                vec![format!("{ty}")],
+                vec![ty.clone()],
                 vec![format!("Either<T, {ty}>")],
                 ty,
                 doc,
@@ -52,7 +52,7 @@ pub fn match_callname(call: &CallName) -> Option<FunctionTemplate> {
             let ty = aliased_type.to_string();
             Some(FunctionTemplate::new(
                 "unwrap_right",
-                vec![format!("{ty}")],
+                vec![ty.clone()],
                 vec![format!("Either<{ty}, U>")],
                 ty,
                 doc,
@@ -68,7 +68,7 @@ pub fn match_callname(call: &CallName) -> Option<FunctionTemplate> {
             let ty = aliased_type.to_string();
             Some(FunctionTemplate::new(
                 "is_none".to_string(),
-                vec![format!("{ty}")],
+                vec![ty.clone()],
                 vec![format!("Option<{ty}>")],
                 "bool",
                 doc,
