@@ -76,6 +76,7 @@ impl LanguageServer for Backend {
             })
             .ok(),
         };
+
         if let Err(error) = self.client.register_capability(vec![registration]).await {
             self.client
                 .log_message(
@@ -91,22 +92,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
-        {
-            let mut config = self.config.write().await;
-            for removed in params.event.removed {
-                if let Some(path) = removed.uri.to_file_path() {
-                    config.workspace_roots.retain(|root| root != path.as_ref());
-                }
-            }
-            for added in params.event.added {
-                if let Some(path) = added.uri.to_file_path() {
-                    let path = path.into_owned();
-                    if !config.workspace_roots.contains(&path) {
-                        config.workspace_roots.push(path);
-                    }
-                }
-            }
-        }
+        self.config.write().await.apply_folder_change(params.event);
         self.reanalyze_open_documents().await;
     }
 
@@ -360,17 +346,22 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
+
         let (source_prefix, functions) = {
             let documents = self.workspace.read().await;
+
             let Some(doc) = documents.get(uri) else {
                 return Ok(None);
             };
+
             let Ok(offset) = position_to_offset(pos, &doc.text) else {
                 return Ok(None);
             };
+
             let Some(prefix) = doc.text.get_byte_slice(..offset) else {
                 return Ok(None);
             };
+
             (prefix.to_string(), doc.functions.clone())
         };
 
@@ -496,6 +487,7 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
+
         Ok(doc.definition_at(uri, params.text_document_position_params.position)?)
     }
 
@@ -516,9 +508,7 @@ impl LanguageServer for Backend {
 
         match call_name {
             Some(parse::CallName::Custom(_)) | None => {}
-            Some(name) => {
-                return Ok(Some(doc.find_all_references(name)?));
-            }
+            Some(name) => return Ok(Some(doc.find_all_references(name)?)),
         }
 
         let Some(func) = (match call_name {
