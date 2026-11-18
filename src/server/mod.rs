@@ -1,12 +1,16 @@
 mod capabilities;
 mod handlers;
 mod transaction;
+#[cfg(test)]
+mod tests;
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
-use tower_lsp_server::Client;
+use tower_lsp_server::lsp_types::{WorkspaceFolder, WorkspaceFoldersChangeEvent};
+use tower_lsp_server::{Client, UriExt};
 
 use self::transaction::DiagnosticTransaction;
 use crate::completion::CompletionProvider;
@@ -20,6 +24,26 @@ struct ServerConfig {
     settings: Settings,
     workspace_roots: Vec<PathBuf>,
     watched_files_registration: bool,
+}
+
+impl ServerConfig {
+    /// Apply a workspace-folder change, keeping each root at most once.
+    fn apply_folder_change(&mut self, event: WorkspaceFoldersChangeEvent) {
+        let removed = folder_paths(event.removed).collect::<Vec<_>>();
+        self.workspace_roots.retain(|root| !removed.contains(root));
+
+        for path in folder_paths(event.added) {
+            if !self.workspace_roots.contains(&path) {
+                self.workspace_roots.push(path);
+            }
+        }
+    }
+}
+
+fn folder_paths(folders: Vec<WorkspaceFolder>) -> impl Iterator<Item = PathBuf> {
+    folders
+        .into_iter()
+        .filter_map(|folder| folder.uri.to_file_path().map(Cow::into_owned))
 }
 
 #[derive(Debug)]
@@ -42,6 +66,3 @@ impl Backend {
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

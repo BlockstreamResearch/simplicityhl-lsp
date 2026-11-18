@@ -966,3 +966,36 @@ fn test_parse_program_invalid_parse() {
 
     assert!(doc.is_none(), "Expected no document to return");
 }
+
+fn workspace_folder(uri: Uri) -> tower_lsp_server::lsp_types::WorkspaceFolder {
+    tower_lsp_server::lsp_types::WorkspaceFolder {
+        uri,
+        name: "folder".to_string(),
+    }
+}
+
+#[test]
+fn folder_change_removes_adds_and_deduplicates_roots() {
+    use tower_lsp_server::lsp_types::WorkspaceFoldersChangeEvent;
+
+    let (kept, removed, added) = (
+        std::env::temp_dir().join("kept"),
+        std::env::temp_dir().join("removed"),
+        std::env::temp_dir().join("added"),
+    );
+
+    let mut config = ServerConfig {
+        workspace_roots: vec![kept.clone(), removed.clone()],
+        ..ServerConfig::default()
+    };
+
+    config.apply_folder_change(WorkspaceFoldersChangeEvent {
+        added: [&added, &added, &kept]
+            .into_iter()
+            .map(|path| workspace_folder(Uri::from_file_path(path).unwrap()))
+            .collect(),
+        removed: vec![workspace_folder(Uri::from_file_path(&removed).unwrap())],
+    });
+
+    assert_eq!(config.workspace_roots, [kept, added]);
+}
