@@ -51,7 +51,7 @@ fn replace_analysis(
     snapshot: AnalysisSnapshot,
     version: Option<i32>,
 ) -> Vec<DiagnosticUpdate> {
-    state.replace_inner_with_generation(uri, snapshot, version, None)
+    state.store_root(uri, snapshot, version, 0)
 }
 
 #[test]

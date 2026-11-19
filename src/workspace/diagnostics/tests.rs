@@ -1,3 +1,5 @@
+use std::fs;
+
 use simplicityhl::error::Span;
 use tempfile::TempDir;
 use tower_lsp_server::lsp_types::Position;
@@ -10,21 +12,24 @@ use crate::config::Settings;
 fn imported_diagnostic_is_owned_by_its_real_source() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    std::fs::write(root.join("Simplex.toml"), "").unwrap();
-    std::fs::create_dir(root.join("simf")).unwrap();
+    fs::write(root.join("Simplex.toml"), "").unwrap();
+    fs::create_dir(root.join("simf")).unwrap();
+
     let library_path = root.join("simf/library.simf");
-    std::fs::write(&library_path, "pub fn broken() -> (u1, u256) { 0 }\n").unwrap();
+    fs::write(&library_path, "pub fn broken() -> (u1, u256) { 0 }\n").unwrap();
+
     let source = "use crate::library::broken;\nfn main() { broken(); }\n";
     let root_path = root.join("simf/main.simf");
-    std::fs::write(&root_path, source).unwrap();
+    fs::write(&root_path, source).unwrap();
+
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
     }))
     .unwrap();
     let snapshot = AnalysisSnapshot::analyze(source, &root_path, &settings, &[root.to_path_buf()]);
     let bundle = DiagnosticBundle::from_snapshot(&snapshot);
-    let library_uri = Uri::from_file_path(std::fs::canonicalize(library_path).unwrap()).unwrap();
-    let root_uri = Uri::from_file_path(std::fs::canonicalize(root_path).unwrap()).unwrap();
+    let library_uri = Uri::from_file_path(fs::canonicalize(library_path).unwrap()).unwrap();
+    let root_uri = Uri::from_file_path(fs::canonicalize(root_path).unwrap()).unwrap();
 
     let imported = bundle
         .get(&library_uri)
@@ -34,6 +39,7 @@ fn imported_diagnostic_is_owned_by_its_real_source() {
                 .find(|diagnostic| diagnostic.message.contains("Expected expression"))
         })
         .unwrap_or_else(|| panic!("expected imported diagnostic, got {bundle:?}"));
+
     assert_ne!(imported.range, Range::default());
     assert!(!bundle.get(&root_uri).is_some_and(|diagnostics| {
         diagnostics
@@ -46,13 +52,16 @@ fn imported_diagnostic_is_owned_by_its_real_source() {
 fn cross_file_secondary_labels_notes_and_help_are_preserved() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    std::fs::write(root.join("Simplex.toml"), "").unwrap();
-    std::fs::create_dir(root.join("simf")).unwrap();
+    fs::write(root.join("Simplex.toml"), "").unwrap();
+    fs::create_dir(root.join("simf")).unwrap();
+
     let library_path = root.join("simf/library.simf");
-    std::fs::write(&library_path, "pub fn helper() {}\n").unwrap();
+    fs::write(&library_path, "pub fn helper() {}\n").unwrap();
+
     let source = "use crate::library::helper;\nfn main() { helper(); }\n";
     let root_path = root.join("simf/main.simf");
-    std::fs::write(&root_path, source).unwrap();
+    fs::write(&root_path, source).unwrap();
+
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
     }))
@@ -66,6 +75,7 @@ fn cross_file_secondary_labels_notes_and_help_are_preserved() {
         .span()
         .file_id;
     assert_ne!(imported_file_id, 0);
+
     snapshot.compiler_diagnostics = vec![CompilerDiagnostic::new(
         CompilerError::CannotParse {
             msg: "primary".to_string(),
@@ -75,6 +85,7 @@ fn cross_file_secondary_labels_notes_and_help_are_preserved() {
     .with_secondary(Span::new(imported_file_id, 7..13), "secondary")
     .with_note("context")
     .with_help("fix it")];
+
     let bundle = DiagnosticBundle::from_snapshot(&snapshot);
     let published = &bundle.get(&snapshot.sources[0].uri).unwrap()[0];
 
@@ -84,6 +95,7 @@ fn cross_file_secondary_labels_notes_and_help_are_preserved() {
     );
     assert!(published.message.contains("Note: context"));
     assert!(published.message.contains("Help: fix it"));
+
     let related = published
         .related_information
         .as_ref()

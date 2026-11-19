@@ -1,4 +1,5 @@
-//! Conversion and aggregation inputs for compiler diagnostics owned by workspace state.
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 
@@ -88,6 +89,7 @@ impl DiagnosticBundle {
     }
 }
 
+/// Errors about where `main` lives.
 fn hidden(diagnostic: &CompilerDiagnostic) -> bool {
     match diagnostic.error() {
         CompilerError::MainRequired => true,
@@ -100,18 +102,19 @@ fn hidden(diagnostic: &CompilerDiagnostic) -> bool {
     }
 }
 
+/// The compiler's error text with its notes and help appended.
 fn message(diagnostic: &CompilerDiagnostic) -> String {
     let mut message = diagnostic.error().to_string();
+
     for note in diagnostic.notes() {
         message.push_str("\n\nNote: ");
         message.push_str(note);
     }
+
     if let Some(help) = diagnostic.help() {
         message.push_str("\n\nHelp: ");
         message.push_str(help);
     }
+
     message
 }
-
-#[cfg(test)]
-mod tests;
