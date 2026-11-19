@@ -22,6 +22,7 @@ impl AnalysisSnapshot {
             let parse::Item::Module(module) = item else {
                 continue;
             };
+
             let Some(0) = module
                 .name()
                 .as_str()
@@ -43,6 +44,7 @@ impl AnalysisSnapshot {
                 else {
                     continue;
                 };
+
                 let items = match use_decl.items() {
                     parse::UseItems::Single(item) => std::slice::from_ref(item),
                     parse::UseItems::List(items) => items.as_slice(),
@@ -60,9 +62,11 @@ impl AnalysisSnapshot {
                     ) else {
                         continue;
                     };
+
                     let Some(source) = self.sources.get(function.span().file_id) else {
                         continue;
                     };
+
                     let start_line = offset_to_position(function.span().start, &source.text)
                         .unwrap_or_default()
                         .line;
@@ -124,6 +128,7 @@ fn collect_call_scopes(
         else {
             continue;
         };
+
         let imported_items = match use_decl.items() {
             parse::UseItems::Single(item) => std::slice::from_ref(item),
             parse::UseItems::List(items) => items.as_slice(),
@@ -139,6 +144,7 @@ fn collect_call_scopes(
             ) else {
                 continue;
             };
+
             bindings.insert(
                 alias.as_ref().unwrap_or(original).to_string(),
                 function.clone(),
@@ -215,10 +221,12 @@ fn resolve_function<'a>(
             parse::UseItems::Single(item) => std::slice::from_ref(item),
             parse::UseItems::List(items) => items.as_slice(),
         };
+
         for (original, alias) in imported_items {
             if alias.as_ref().unwrap_or(original).as_str() != name {
                 continue;
             }
+
             let path = use_decl.path();
             let target_file_id = path
                 .get(1)?
@@ -226,6 +234,7 @@ fn resolve_function<'a>(
                 .strip_prefix("unit_")?
                 .parse::<usize>()
                 .ok()?;
+
             if let Some(function) = resolve_function(
                 program,
                 target_file_id,
@@ -237,6 +246,7 @@ fn resolve_function<'a>(
             }
         }
     }
+
     None
 }
 
@@ -253,7 +263,7 @@ fn module_items<'a>(
 
     let mut items = unit.items();
     for segment in module_path {
-        let module = items.iter().find_map(|item| match item {
+        let module: &parse::Module = items.iter().find_map(|item| match item {
             parse::Item::Module(module) if module.name().as_str() == segment.as_str() => {
                 Some(module)
             }
