@@ -1,6 +1,8 @@
 mod entry_point;
 mod resolution;
 mod sources;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -154,6 +156,3 @@ impl AnalysisSnapshot {
         snapshot
     }
 }
-
-#[cfg(test)]
-mod tests;
