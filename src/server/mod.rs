@@ -1,8 +1,8 @@
 mod capabilities;
 mod handlers;
-mod transaction;
 #[cfg(test)]
 mod tests;
+mod transaction;
 
 use std::borrow::Cow;
 use std::path::PathBuf;
