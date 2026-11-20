@@ -1,6 +1,7 @@
 mod references;
+mod symbols;
 
-pub(crate) use references::FunctionIdentity;
+pub(crate) use references::{FunctionIdentity, ReferenceTarget};
 
 use miniscript::iter::TreeLike;
 use simplicityhl::parse::{self, CallName};

@@ -1,3 +1,5 @@
+use std::fs;
+
 use simplicityhl::error::Location as CompilerLocation;
 use simplicityhl::UnstableFeatures;
 use smplx_build::CONFIG_FILENAME;
@@ -9,11 +11,11 @@ use crate::workspace::WorkspaceState;
 
 fn temp_project(source: &str) -> (TempDir, PathBuf) {
     let temp = TempDir::new().expect("temp dir");
-    std::fs::write(temp.path().join(CONFIG_FILENAME), "").expect("write manifest");
-    std::fs::create_dir(temp.path().join("simf")).expect("create source dir");
+    fs::write(temp.path().join(CONFIG_FILENAME), "").expect("write manifest");
+    fs::create_dir(temp.path().join("simf")).expect("create source dir");
 
     let path = temp.path().join("simf/main.simf");
-    std::fs::write(&path, source).expect("write source");
+    fs::write(&path, source).expect("write source");
     (temp, path)
 }
 
@@ -48,13 +50,13 @@ fn parse_failure_retains_the_exact_root_source() {
 fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
     let temp = tempfile::TempDir::new().unwrap();
     let source_directory = temp.path().join("simf");
-    std::fs::create_dir(&source_directory).unwrap();
-    std::fs::write(temp.path().join(CONFIG_FILENAME), "").unwrap();
+    fs::create_dir(&source_directory).unwrap();
+    fs::write(temp.path().join(CONFIG_FILENAME), "").unwrap();
 
     let path = source_directory.join("verifier.simf");
     let renamed = source_directory.join("renamed.simf");
     let source = "fn main() {}\n";
-    std::fs::write(&path, source).unwrap();
+    fs::write(&path, source).unwrap();
 
     let roots = [temp.path().to_path_buf()];
     let uri = Uri::from_file_path(&path).unwrap();
@@ -67,7 +69,7 @@ fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
         .replace_if_current(&uri, initial, open.version, open.generation)
         .expect("initial analysis update");
 
-    std::fs::rename(&path, &renamed).unwrap();
+    fs::rename(&path, &renamed).unwrap();
     let change = workspace
         .begin_change(&uri, source, Some(2))
         .expect("renamed document remains open");
@@ -87,13 +89,15 @@ fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
             .contains("Failed to find library target path")
             && diagnostic.message.contains("verifier.simf")
     }));
+
     let current = workspace.get(&uri).expect("current missing-file snapshot");
     assert_eq!(current.text.to_string(), source);
     assert_eq!(current.sources[0].uri, uri);
 
     let moved = AnalysisSnapshot::analyze(source, &renamed, &Settings::default(), &roots);
     assert!(moved.compiler_diagnostics.is_empty());
-    std::fs::remove_file(&renamed).unwrap();
+
+    fs::remove_file(&renamed).unwrap();
     let deleted = AnalysisSnapshot::analyze(source, &renamed, &Settings::default(), &roots);
     assert!(deleted.compiler_diagnostics.iter().any(|diagnostic| {
         matches!(
@@ -109,16 +113,16 @@ fn renamed_or_deleted_root_updates_analysis_with_a_diagnostic() {
 fn transiently_missing_dependency_source_is_a_root_diagnostic() {
     let temp = tempfile::TempDir::new().unwrap();
     let root = temp.path();
-    std::fs::create_dir_all(root.join("simf")).unwrap();
-    std::fs::create_dir_all(root.join("vendor/library/simf")).unwrap();
+    fs::create_dir_all(root.join("simf")).unwrap();
+    fs::create_dir_all(root.join("vendor/library/simf")).unwrap();
 
-    std::fs::write(
+    fs::write(
         root.join("Simplex.toml"),
         "[dependencies]\nlibrary = { path = 'vendor/library' }\n",
     )
     .unwrap();
-    std::fs::write(root.join("vendor/library/Simplex.toml"), "").unwrap();
-    std::fs::write(
+    fs::write(root.join("vendor/library/Simplex.toml"), "").unwrap();
+    fs::write(
         root.join("vendor/library/simf/ops.simf"),
         "pub fn verify() {}\n",
     )
@@ -126,7 +130,7 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
 
     let path = root.join("simf/main.simf");
     let source = "use library::ops::verify;\nfn main() { verify(); }\n";
-    std::fs::write(&path, source).unwrap();
+    fs::write(&path, source).unwrap();
 
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
@@ -136,8 +140,9 @@ fn transiently_missing_dependency_source_is_a_root_diagnostic() {
 
     let initial = AnalysisSnapshot::analyze(source, &path, &settings, &roots);
     assert!(initial.compiler_diagnostics.is_empty());
+
     let dependency_source = root.join("vendor/library/simf");
-    std::fs::rename(&dependency_source, root.join("vendor/library/simf.moved")).unwrap();
+    fs::rename(&dependency_source, root.join("vendor/library/simf.moved")).unwrap();
 
     let missing = AnalysisSnapshot::analyze(source, &path, &settings, &roots);
     assert_eq!(missing.text.to_string(), source);
@@ -209,6 +214,7 @@ fn library_without_main_keeps_definition_metadata() {
     let snapshot = analyze_in(&temp, &path, source, &Settings::default());
 
     assert!(snapshot.compiler_diagnostics.is_empty());
+
     let call_start = source.rfind("helper").expect("helper call");
     let call = snapshot
         .find_related_call(Span::new(0, call_start + 1..call_start + 1))
@@ -217,6 +223,7 @@ fn library_without_main_keeps_definition_metadata() {
         .functions
         .get_func(&call.name().to_string())
         .expect("helper definition");
+
     assert_eq!(function.name().as_str(), "helper");
     assert_eq!(function.span().file_id, 0);
     assert_eq!(snapshot.sources[0].uri, Uri::from_file_path(path).unwrap());
@@ -238,6 +245,7 @@ fn nested_main_does_not_conflict_with_the_synthetic_entry_point() {
             CompilerError::FunctionRedefined { name } if name.as_str() == "main"
         )
     }));
+
     let expected = CompilerError::MainOutOfEntryFile.to_string();
     assert!(snapshot.compiler_diagnostics.iter().any(|diagnostic| {
         matches!(diagnostic.error(), CompilerError::CannotParse { msg } if msg == &expected)
@@ -285,8 +293,8 @@ fn manifest_dependency_and_custom_source_directory_are_resolved() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let write = |path: PathBuf, source: &str| {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, source).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source).unwrap();
     };
     write(
         root.join("Simplex.toml"),
@@ -297,14 +305,15 @@ fn manifest_dependency_and_custom_source_directory_are_resolved() {
         root.join("vendor/math/simf/ops.simf"),
         "pub fn double(a: u32) -> u32 { let (_, n): (bool, u32) = jet::add_32(a, a); n }\n",
     );
+
     let source = "use math::ops::double;\nfn main() { let _: u32 = double(2); }\n";
     let path = root.join("contracts/main.simf");
     write(path.clone(), source);
+
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
     }))
     .unwrap();
-
     let snapshot = AnalysisSnapshot::analyze(source, &path, &settings, &[root.to_path_buf()]);
     assert!(
         snapshot.compiler_diagnostics.is_empty(),
@@ -318,28 +327,30 @@ fn manifest_dependency_and_custom_source_directory_are_resolved() {
 fn duplicate_imported_mains_point_to_distinct_direct_and_transitive_uses() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
-    std::fs::write(root.join("Simplex.toml"), "").unwrap();
-    std::fs::create_dir(root.join("simf")).unwrap();
-    std::fs::write(
+    fs::write(root.join("Simplex.toml"), "").unwrap();
+    fs::create_dir(root.join("simf")).unwrap();
+    fs::write(
         root.join("simf/first.simf"),
         "pub fn first() {}\nfn main() {}\n",
     )
     .unwrap();
-    std::fs::write(
+    fs::write(
         root.join("simf/facade.simf"),
         "pub use crate::leaf::second;\n",
     )
     .unwrap();
-    std::fs::write(
+    fs::write(
         root.join("simf/leaf.simf"),
         "pub fn second() {}\nfn main() {}\n",
     )
     .unwrap();
+
     let first_import = "use crate::first::first;";
     let second_import = "use crate::facade::second;";
     let source = format!("{first_import}\n{second_import}\nfn main() {{}}\n");
     let path = root.join("simf/main.simf");
-    std::fs::write(&path, &source).unwrap();
+
+    fs::write(&path, &source).unwrap();
     let settings = Settings::from_json(serde_json::json!({
         "experimentalFeatures": { "imports": true }
     }))
@@ -359,6 +370,7 @@ fn duplicate_imported_mains_point_to_distinct_direct_and_transitive_uses() {
     let CompilerLocation::Code(span) = diagnostic.location() else {
         panic!("duplicate main should point to source code");
     };
+
     assert_eq!(span.to_slice(&source), Some(first_import));
     assert!(diagnostic.secondary().iter().any(|label| {
         label.span.to_slice(&source) == Some(second_import)
@@ -370,6 +382,7 @@ fn duplicate_imported_mains_point_to_distinct_direct_and_transitive_uses() {
 fn missing_configured_manifest_is_an_analysis_diagnostic() {
     let source = "fn main() {}\n";
     let (temp, path) = temp_project(source);
+
     let mut settings = Settings::default();
     settings.project.simplex.manifest_path = "nowhere/Simplex.toml".to_string();
     let snapshot = analyze_in(&temp, &path, source, &settings);

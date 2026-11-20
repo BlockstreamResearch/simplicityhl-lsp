@@ -26,6 +26,7 @@ impl DiagnosticTransaction {
             let mut workspace = workspace.write().await;
             transition(&mut workspace)
         };
+
         if let Some(updates) = updates {
             publish(updates).await;
         }

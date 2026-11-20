@@ -1,6 +1,8 @@
 mod entry_point;
 mod resolution;
 mod sources;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -57,14 +59,10 @@ impl AnalysisSnapshot {
             parse::Item::Function(function) => Some(function),
             _ => None,
         }) {
-            let start_line = offset_to_position(function.span().start, &analysis.text)
-                .unwrap_or_default()
-                .line;
-            analysis.functions.insert(
-                function.name().to_string(),
-                function.clone(),
-                get_comments_from_lines(start_line, &analysis.text),
-            );
+            let documentation = documentation(function, &analysis.text);
+            analysis
+                .functions
+                .insert(function.name().to_string(), function.clone(), documentation);
         }
 
         analysis
@@ -100,27 +98,11 @@ impl AnalysisSnapshot {
             .and_then(|project| project.dependency_map(path))
         {
             Ok(dependencies) => dependencies,
-            Err(err) => {
-                diagnostics.push(CompilerDiagnostic::new(
-                    CompilerError::CannotParse {
-                        msg: err.to_string(),
-                    },
-                    Span::new(0, 0..0),
-                ));
-                snapshot.compiler_diagnostics = diagnostics.diagnostics().to_vec();
-                return snapshot;
-            }
+            Err(error) => return snapshot.stopped(diagnostics, error.to_string()),
         };
         let canonical_source: CanonSourceFile = match source_file.try_into() {
             Ok(source) => source,
-            Err(error) => {
-                diagnostics.push(CompilerDiagnostic::new(
-                    CompilerError::CannotParse { msg: error },
-                    Span::new(0, 0..0),
-                ));
-                snapshot.compiler_diagnostics = diagnostics.diagnostics().to_vec();
-                return snapshot;
-            }
+            Err(error) => return snapshot.stopped(diagnostics, error),
         };
 
         // The compiler requires an entry point, while editors also analyze library files.
@@ -153,7 +135,23 @@ impl AnalysisSnapshot {
 
         snapshot
     }
+
+    /// End an analysis that stopped before type checking, with `message` at the top of the file.
+    fn stopped(mut self, mut diagnostics: DiagnosticManager, message: String) -> Self {
+        diagnostics.push(CompilerDiagnostic::new(
+            CompilerError::CannotParse { msg: message },
+            Span::new(0, 0..0),
+        ));
+
+        self.compiler_diagnostics = diagnostics.diagnostics().to_vec();
+        self
+    }
 }
 
-#[cfg(test)]
-mod tests;
+/// The doc comments above `function` in `text`.
+fn documentation(function: &parse::Function, text: &Rope) -> String {
+    let start_line = offset_to_position(function.span().start, text)
+        .unwrap_or_default()
+        .line;
+    get_comments_from_lines(start_line, text)
+}

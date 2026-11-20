@@ -8,6 +8,7 @@ use simplicityhl::error::{
 };
 use simplicityhl::parse::{self, ParseFromStrWithErrors};
 use simplicityhl::UnstableFeatures;
+use smplx_build::CONFIG_FILENAME;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tower_lsp_server::lsp_types::{Range, Uri};
@@ -25,8 +26,7 @@ fn watched_file_registration_matches_the_protocol_contract() {
         serde_json::to_value(super::capabilities::watched_files()).unwrap(),
         serde_json::json!([
             { "globPattern": "**/*.simf" },
-            { "globPattern": "**/Simplex.toml" },
-            { "globPattern": "**/simplex.toml" }
+            { "globPattern": format!("**/{CONFIG_FILENAME}") },
         ])
     );
 }
@@ -965,4 +965,37 @@ fn test_parse_program_invalid_parse() {
     }
 
     assert!(doc.is_none(), "Expected no document to return");
+}
+
+fn workspace_folder(uri: Uri) -> tower_lsp_server::lsp_types::WorkspaceFolder {
+    tower_lsp_server::lsp_types::WorkspaceFolder {
+        uri,
+        name: "folder".to_string(),
+    }
+}
+
+#[test]
+fn folder_change_removes_adds_and_deduplicates_roots() {
+    use tower_lsp_server::lsp_types::WorkspaceFoldersChangeEvent;
+
+    let (kept, removed, added) = (
+        std::env::temp_dir().join("kept"),
+        std::env::temp_dir().join("removed"),
+        std::env::temp_dir().join("added"),
+    );
+
+    let mut config = ServerConfig {
+        workspace_roots: vec![kept.clone(), removed.clone()],
+        ..ServerConfig::default()
+    };
+
+    config.apply_folder_change(WorkspaceFoldersChangeEvent {
+        added: [&added, &added, &kept]
+            .into_iter()
+            .map(|path| workspace_folder(Uri::from_file_path(path).unwrap()))
+            .collect(),
+        removed: vec![workspace_folder(Uri::from_file_path(&removed).unwrap())],
+    });
+
+    assert_eq!(config.workspace_roots, [kept, added]);
 }

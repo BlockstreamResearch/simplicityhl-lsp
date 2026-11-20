@@ -6,7 +6,15 @@ use tower_lsp_server::lsp_types;
 
 use crate::analysis::AnalysisSnapshot;
 use crate::error::LspError;
-use crate::text::{get_call_span, span_to_positions};
+use crate::text::{get_call_span, position_to_span, span_contains, span_to_positions};
+
+/// What a references request should search for.
+pub(crate) enum ReferenceTarget<'a> {
+    /// A jet or built-in call: every call with this name in the same document.
+    Name(&'a CallName),
+    /// A function defined in code: calls that resolve to it, in every open document.
+    Function(FunctionIdentity),
+}
 
 /// Stable identity for one function definition across independently analyzed roots.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -17,6 +25,39 @@ pub(crate) struct FunctionIdentity {
 }
 
 impl AnalysisSnapshot {
+    /// The call or function definition name at `position`.
+    pub(crate) fn reference_target(
+        &self,
+        position: lsp_types::Position,
+    ) -> Result<Option<ReferenceTarget<'_>>, LspError> {
+        let token_span = position_to_span(position, &self.text)?;
+
+        let function = match self.find_related_call(token_span).map(parse::Call::name) {
+            Some(CallName::Custom(name)) => self.functions.get_func(name.as_str()),
+            Some(name) => return Ok(Some(ReferenceTarget::Name(name))),
+            None => {
+                let Some(function) = self
+                    .functions
+                    .iter()
+                    .find(|func| span_contains(func.span(), &token_span))
+                else {
+                    return Ok(None);
+                };
+
+                let range = self.find_function_name_range(function)?;
+                if !(range.start..=range.end).contains(&position) {
+                    return Ok(None);
+                }
+
+                Some(function)
+            }
+        };
+
+        Ok(function
+            .and_then(|func| self.function_identity(func))
+            .map(ReferenceTarget::Function))
+    }
+
     pub(crate) fn function_identity(&self, function: &parse::Function) -> Option<FunctionIdentity> {
         let span = function.span();
         let source = self.sources.get(span.file_id)?;
