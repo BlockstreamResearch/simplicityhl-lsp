@@ -46,6 +46,8 @@ fn folder_paths(folders: Vec<WorkspaceFolder>) -> impl Iterator<Item = PathBuf> 
         .filter_map(|folder| folder.uri.to_file_path().map(Cow::into_owned))
 }
 
+/// State shared by every LSP handler for the whole session, plus the
+/// `client` used to send messages back to the editor.
 #[derive(Debug)]
 pub struct Backend {
     client: Client,

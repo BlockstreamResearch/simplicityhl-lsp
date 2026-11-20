@@ -118,6 +118,7 @@ impl LanguageServer for Backend {
                         .is_some_and(|name| name.eq_ignore_ascii_case(CONFIG_FILENAME))
             })
         });
+
         if relevant {
             self.reanalyze_open_documents().await;
         }
