@@ -8,6 +8,7 @@ use simplicityhl::error::{
 };
 use simplicityhl::parse::{self, ParseFromStrWithErrors};
 use simplicityhl::UnstableFeatures;
+use smplx_build::CONFIG_FILENAME;
 use tempfile::TempDir;
 use tokio::sync::Notify;
 use tower_lsp_server::lsp_types::{Range, Uri};
@@ -25,8 +26,7 @@ fn watched_file_registration_matches_the_protocol_contract() {
         serde_json::to_value(super::capabilities::watched_files()).unwrap(),
         serde_json::json!([
             { "globPattern": "**/*.simf" },
-            { "globPattern": "**/Simplex.toml" },
-            { "globPattern": "**/simplex.toml" }
+            { "globPattern": format!("**/{CONFIG_FILENAME}") },
         ])
     );
 }
