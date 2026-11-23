@@ -195,7 +195,7 @@ fn unit_id(name: &str) -> Option<usize> {
     name.strip_prefix("unit_")?.parse().ok()
 }
 
-fn use_items(use_decl: &parse::UseDecl) -> &[parse::AliasedSymbolName] {
+pub(crate) fn use_items(use_decl: &parse::UseDecl) -> &[parse::AliasedSymbolName] {
     match use_decl.items() {
         parse::UseItems::Single(item) => std::slice::from_ref(item),
         parse::UseItems::List(items) => items,

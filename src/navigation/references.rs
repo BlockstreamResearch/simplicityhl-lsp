@@ -61,6 +61,7 @@ impl AnalysisSnapshot {
     pub(crate) fn function_identity(&self, function: &parse::Function) -> Option<FunctionIdentity> {
         let span = function.span();
         let source = self.sources.get(span.file_id)?;
+
         Some(FunctionIdentity {
             uri: source.uri.clone(),
             start: span.start,
@@ -80,6 +81,7 @@ impl AnalysisSnapshot {
         &self,
         target: &FunctionIdentity,
     ) -> Result<Vec<lsp_types::Location>, LspError> {
+        // Keyed by the URI string.
         let mut seen = HashSet::new();
         self.reference_locations(
             |function| {
@@ -91,14 +93,12 @@ impl AnalysisSnapshot {
                     ))
                 })
             },
-            |function, call| {
-                let CallName::Custom(name) = call.name() else {
-                    return false;
-                };
-                self.resolve_custom_call(function, name.as_str())
+            |function, call| match call.name() {
+                CallName::Custom(name) => self
+                    .resolve_custom_call(function, name.as_str())
                     .and_then(|resolved| self.function_identity(resolved))
-                    .as_ref()
-                    == Some(target)
+                    .is_some_and(|identity| &identity == target),
+                _ => false,
             },
         )
     }
@@ -108,32 +108,32 @@ impl AnalysisSnapshot {
         mut include_function: impl FnMut(&parse::Function) -> bool,
         mut include_call: impl FnMut(&parse::Function, &parse::Call) -> bool,
     ) -> Result<Vec<lsp_types::Location>, LspError> {
-        self.functions
+        let mut locations = Vec::new();
+        for function in self
+            .functions
             .iter()
             .filter(|function| include_function(function))
-            .filter_map(|function| {
-                let source = self.sources.get(function.span().file_id)?;
-                Some(
-                    parse::ExprTree::Expression(function.body())
-                        .pre_order_iter()
-                        .filter_map(|expression| match expression {
-                            parse::ExprTree::Call(call) if include_call(function, call) => {
-                                Some(get_call_span(call))
-                            }
-                            _ => None,
-                        })
-                        .map(|span| (span, source))
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .flatten()
-            .map(|(span, source)| {
-                let (start, end) = span_to_positions(&span, &source.text)?;
-                Ok(lsp_types::Location {
-                    range: lsp_types::Range { start, end },
-                    uri: source.uri.clone(),
-                })
-            })
-            .collect()
+        {
+            let Some(source) = self.sources.get(function.span().file_id) else {
+                continue;
+            };
+
+            for expression in parse::ExprTree::Expression(function.body()).pre_order_iter() {
+                let parse::ExprTree::Call(call) = expression else {
+                    continue;
+                };
+
+                if include_call(function, call) {
+                    let (start, end) = span_to_positions(&get_call_span(call), &source.text)?;
+
+                    locations.push(lsp_types::Location::new(
+                        source.uri.clone(),
+                        lsp_types::Range::new(start, end),
+                    ));
+                }
+            }
+        }
+
+        Ok(locations)
     }
 }

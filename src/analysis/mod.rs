@@ -19,6 +19,7 @@ use simplicityhl::{parse, TemplateAst};
 use tower_lsp_server::lsp_types::Uri;
 use tower_lsp_server::UriExt;
 
+pub(crate) use resolution::use_items;
 pub use sources::{Functions, SourceSet};
 
 use self::resolution::collect_use_declarations;
