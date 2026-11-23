@@ -11,7 +11,8 @@ out/
 *.ast 
 dist/
 
-# vscode package
+# VSCode
+.vscode/
 *.vsix
 
 # lock files
