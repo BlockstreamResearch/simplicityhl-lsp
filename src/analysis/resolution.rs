@@ -14,26 +14,27 @@ impl AnalysisSnapshot {
         let Some(source_map) = template_ast.source_map() else {
             return;
         };
+
         self.populate_sources(source_map);
 
         let program = template_ast.resolved_program();
         self.populate_call_scopes(program);
 
-        let Some(root) =
-            modules(program.items()).find(|module| unit_id(module.name().as_str()) == Some(0))
-        else {
-            return;
-        };
+        let roots =
+            modules(program.items()).filter(|module| unit_id(module.name().as_str()) == Some(0));
 
-        for (local_name, function) in imports(program, root.items()) {
-            let Some(source) = self.sources.get(function.span().file_id) else {
-                continue;
-            };
-            self.functions.insert(
-                local_name.to_string(),
-                function.clone(),
-                documentation(function, &source.text),
-            );
+        for root in roots {
+            for (local_name, function) in imports(program, root.items()) {
+                let Some(source) = self.sources.get(function.span().file_id) else {
+                    continue;
+                };
+
+                self.functions.insert(
+                    local_name.to_string(),
+                    function.clone(),
+                    documentation(function, &source.text),
+                );
+            }
         }
     }
 
@@ -177,8 +178,8 @@ fn module_items<'a>(
     file_id: usize,
     module_path: &[Identifier],
 ) -> Option<&'a [parse::Item]> {
-    let unit =
-        modules(program.items()).find(|module| unit_id(module.name().as_str()) == Some(file_id))?;
+    let unit_name = format!("unit_{file_id}");
+    let unit = modules(program.items()).find(|module| module.name().as_str() == unit_name)?;
 
     let mut items = unit.items();
     for segment in module_path {

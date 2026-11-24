@@ -30,11 +30,17 @@ use crate::text::{get_comments_from_lines, offset_to_position};
 /// Immutable result of analyzing one open root document.
 #[derive(Debug)]
 pub struct AnalysisSnapshot {
+    /// Names visible at the root's top level.
     pub functions: Functions,
     pub use_declarations: Vec<parse::UseDecl>,
+    /// Maps a span's `file_id` to the URI and text of the file it belongs to.
     pub sources: SourceSet,
+    /// The root file's text this snapshot was analyzed from;
+    /// positions are converted against it.
     pub text: Rope,
+    /// Compiler errors and warnings, for the root and the files it imports.
     pub compiler_diagnostics: Vec<CompilerDiagnostic>,
+    /// Calls are resolved in the scope where they're written (see `resolve_custom_call`)
     call_scopes: HashMap<Span, Arc<HashMap<String, parse::Function>>>,
 }
 
