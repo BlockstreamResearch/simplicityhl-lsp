@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod tests;
+
 use std::collections::HashMap;
 
 use tower_lsp_server::lsp_types::{Diagnostic, Position, Range};
@@ -156,6 +159,3 @@ fn utf16_column_at_byte(line: &str, byte_column: usize) -> usize {
     }
     line[..boundary].encode_utf16().count()
 }
-
-#[cfg(test)]
-mod tests;

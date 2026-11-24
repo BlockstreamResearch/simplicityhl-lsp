@@ -2,34 +2,50 @@ use miniscript::iter::TreeLike;
 use simplicityhl::error::Span;
 use simplicityhl::parse;
 use tower_lsp_server::lsp_types::{
-    SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend,
+    Range, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend,
 };
 
 use crate::analysis::AnalysisSnapshot;
 use crate::text::span_to_positions;
 
-mod token_type {
-    pub const FUNCTION: u32 = 0;
-    pub const NAMESPACE: u32 = 5;
-}
+/// The legend's token types; a token's type is its index here.
+const TOKEN_TYPES: [SemanticTokenType; 6] = [
+    SemanticTokenType::FUNCTION,
+    SemanticTokenType::PARAMETER,
+    SemanticTokenType::VARIABLE,
+    SemanticTokenType::TYPE,
+    SemanticTokenType::KEYWORD,
+    SemanticTokenType::NAMESPACE,
+];
 
+/// `(line, column, length, type, modifiers)` with absolute positions, before [`encode`].
+///
+/// For `fn plus() {}` and `fn main() { plus(); }` on the next line:
+/// ```text
+/// (0,  3, 4, FUNCTION, 0b11)  plus  definition
+/// (1,  3, 4, FUNCTION, 0b11)  main  definition
+/// (1, 12, 4, FUNCTION, 0)     plus  call
+/// ```
 type RawToken = (u32, u32, u32, u32, u32);
 
 pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
-        token_types: vec![
-            SemanticTokenType::FUNCTION,
-            SemanticTokenType::PARAMETER,
-            SemanticTokenType::VARIABLE,
-            SemanticTokenType::TYPE,
-            SemanticTokenType::KEYWORD,
-            SemanticTokenType::NAMESPACE,
-        ],
+        token_types: TOKEN_TYPES.to_vec(),
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
             SemanticTokenModifier::DEFINITION,
         ],
     }
+}
+
+/// The legend index of `kind`.
+fn type_index(kind: &SemanticTokenType) -> u32 {
+    let index = TOKEN_TYPES
+        .iter()
+        .position(|token_type| token_type == kind)
+        .expect("token type is in the legend");
+
+    u32::try_from(index).expect("legend index fits in u32")
 }
 
 pub fn tokens(snapshot: &AnalysisSnapshot) -> Vec<SemanticToken> {
@@ -39,34 +55,33 @@ pub fn tokens(snapshot: &AnalysisSnapshot) -> Vec<SemanticToken> {
         .unwrap_or_default();
     let mut raw_tokens = Vec::new();
 
-    for function in snapshot.functions.iter() {
-        if function.span().file_id != 0 {
-            continue;
-        }
-
-        if let Ok(name_range) = snapshot.find_function_name_range(function) {
-            if name_range.start.line == name_range.end.line
-                && name_range.start.character < name_range.end.character
-            {
-                raw_tokens.push((
-                    name_range.start.line,
-                    name_range.start.character,
-                    name_range.end.character - name_range.start.character,
-                    token_type::FUNCTION,
-                    0b11,
-                ));
-            }
-        }
+    for function in snapshot
+        .functions
+        .iter()
+        .filter(|function| function.span().file_id == 0)
+    {
+        raw_tokens.extend(
+            snapshot
+                .find_function_name_range(function)
+                .ok()
+                // 0b11: declaration and definition, bits 0 and 1 of the legend's modifiers.
+                .and_then(|range| {
+                    range_token(range, type_index(&SemanticTokenType::FUNCTION), 0b11)
+                }),
+        );
 
         for expression in parse::ExprTree::Expression(function.body()).pre_order_iter() {
             let parse::ExprTree::Call(call) = expression else {
                 continue;
             };
-            for (span, token_type) in call_spans(call, &lexer_tokens) {
-                if let Some(token) = raw_token(&span, &snapshot.text, token_type, 0) {
-                    raw_tokens.push(token);
-                }
-            }
+
+            raw_tokens.extend(
+                call_spans(call, &lexer_tokens)
+                    .into_iter()
+                    .filter_map(|(span, token_type)| {
+                        raw_token(&span, &snapshot.text, token_type, 0)
+                    }),
+            );
         }
     }
 
@@ -75,16 +90,20 @@ pub fn tokens(snapshot: &AnalysisSnapshot) -> Vec<SemanticToken> {
 
 fn raw_token(span: &Span, text: &ropey::Rope, token_type: u32, modifiers: u32) -> Option<RawToken> {
     let (start, end) = span_to_positions(span, text).ok()?;
-    if start.line != end.line || start.character >= end.character {
-        return None;
-    }
-    Some((
-        start.line,
-        start.character,
-        end.character - start.character,
-        token_type,
-        modifiers,
-    ))
+    range_token(Range::new(start, end), token_type, modifiers)
+}
+
+/// A token for `range` if it is non-empty and on one line.
+fn range_token(range: Range, token_type: u32, modifiers: u32) -> Option<RawToken> {
+    (range.start.line == range.end.line && range.start.character < range.end.character).then(|| {
+        (
+            range.start.line,
+            range.start.character,
+            range.end.character - range.start.character,
+            token_type,
+            modifiers,
+        )
+    })
 }
 
 fn call_spans(call: &parse::Call, tokens: &simplicityhl::lexer::Tokens<'_>) -> Vec<(Span, u32)> {
@@ -104,52 +123,50 @@ fn call_spans(call: &parse::Call, tokens: &simplicityhl::lexer::Tokens<'_>) -> V
             .map(|(_, span)| *span)
     };
 
-    let function = token_type::FUNCTION;
-    match call.name() {
-        parse::CallName::Jet(_) => token_at_start
-            .filter(|(token, _)| matches!(token, Token::Jet(_)))
-            .map(|(_, span)| {
-                vec![
-                    (
-                        Span::new(span.file_id, span.start..span.start + 3),
-                        token_type::NAMESPACE,
-                    ),
-                    (Span::new(span.file_id, span.start + 5..span.end), function),
-                ]
-            })
-            .unwrap_or_default(),
-        parse::CallName::Assert | parse::CallName::Panic | parse::CallName::Debug => token_at_start
-            .filter(|(token, _)| matches!(token, Token::Macro(_)))
-            .map(|(_, span)| vec![(*span, function)])
-            .unwrap_or_default(),
-        name => {
-            let (callable, callable_starts_call, callback) = match name {
-                parse::CallName::Custom(name) => (name.as_str(), true, None),
-                parse::CallName::Fold(name, _) => ("fold", true, Some(name.as_str())),
-                parse::CallName::ArrayFold(name, _) => ("array_fold", true, Some(name.as_str())),
-                parse::CallName::ForWhile(name) => ("for_while", true, Some(name.as_str())),
-                parse::CallName::UnwrapLeft(_) => ("unwrap_left", true, None),
-                parse::CallName::UnwrapRight(_) => ("unwrap_right", true, None),
-                parse::CallName::Unwrap => ("unwrap", true, None),
-                parse::CallName::IsNone(_) => ("is_none", true, None),
-                parse::CallName::TypeCast(_) => ("into", false, None),
-                parse::CallName::Jet(_)
-                | parse::CallName::Assert
-                | parse::CallName::Panic
-                | parse::CallName::Debug => unreachable!(),
-            };
-            [
-                find_ident(callable, callable_starts_call),
-                callback.and_then(|name| find_ident(name, false)),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|span| (span, function))
-            .collect()
+    let function = type_index(&SemanticTokenType::FUNCTION);
+    let (callable, callable_starts_call, callback) = match call.name() {
+        parse::CallName::Jet(_) => {
+            return token_at_start
+                .filter(|(token, _)| matches!(token, Token::Jet(_)))
+                .map(|(_, span)| {
+                    vec![
+                        (
+                            Span::new(span.file_id, span.start..span.start + 3),
+                            type_index(&SemanticTokenType::NAMESPACE),
+                        ),
+                        (Span::new(span.file_id, span.start + 5..span.end), function),
+                    ]
+                })
+                .unwrap_or_default()
         }
-    }
+        parse::CallName::Assert | parse::CallName::Panic | parse::CallName::Debug => {
+            return token_at_start
+                .filter(|(token, _)| matches!(token, Token::Macro(_)))
+                .map(|(_, span)| vec![(*span, function)])
+                .unwrap_or_default()
+        }
+        parse::CallName::Custom(name) => (name.as_str(), true, None),
+        parse::CallName::Fold(name, _) => ("fold", true, Some(name.as_str())),
+        parse::CallName::ArrayFold(name, _) => ("array_fold", true, Some(name.as_str())),
+        parse::CallName::ForWhile(name) => ("for_while", true, Some(name.as_str())),
+        parse::CallName::UnwrapLeft(_) => ("unwrap_left", true, None),
+        parse::CallName::UnwrapRight(_) => ("unwrap_right", true, None),
+        parse::CallName::Unwrap => ("unwrap", true, None),
+        parse::CallName::IsNone(_) => ("is_none", true, None),
+        parse::CallName::TypeCast(_) => ("into", false, None),
+    };
+    [
+        find_ident(callable, callable_starts_call),
+        callback.and_then(|name| find_ident(name, false)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|span| (span, function))
+    .collect()
 }
 
+/// Sort the tokens and make each position relative to the previous token: `delta_line` lines down,
+/// then `delta_start` columns from its start on the same line, or from column 0 on a new line.
 fn encode(mut tokens: Vec<RawToken>) -> Vec<SemanticToken> {
     tokens.sort_unstable();
     tokens.dedup();
@@ -165,8 +182,10 @@ fn encode(mut tokens: Vec<RawToken>) -> Vec<SemanticToken> {
             } else {
                 character
             };
+
             previous_line = line;
             previous_character = character;
+
             SemanticToken {
                 delta_line,
                 delta_start,
@@ -197,6 +216,7 @@ mod tests {
             &mut diagnostics,
         )
         .unwrap_or_else(|| panic!("source should parse: {diagnostics:?}"));
+
         AnalysisSnapshot::from_program(
             &program,
             source,
@@ -216,6 +236,7 @@ mod tests {
                 } else {
                     token.delta_start
                 };
+
                 (
                     line,
                     character,
@@ -227,15 +248,16 @@ mod tests {
             .collect()
     }
 
-    fn expected(source: &str, offset: usize, text: &str, kind: u32) -> RawToken {
+    fn expected(source: &str, offset: usize, text: &str, kind: &SemanticTokenType) -> RawToken {
         let rope = Rope::from_str(source);
         let start = offset_to_position(offset, &rope).expect("valid token start");
         let end = offset_to_position(offset + text.len(), &rope).expect("valid token end");
+
         (
             start.line,
             start.character,
             end.character - start.character,
-            kind,
+            type_index(kind),
             0,
         )
     }
@@ -252,13 +274,13 @@ mod tests {
             source,
             builtin,
             "array_fold",
-            token_type::FUNCTION
+            &SemanticTokenType::FUNCTION
         )));
         assert!(decoded.contains(&expected(
             source,
             callback,
             "consume_budget",
-            token_type::FUNCTION,
+            &SemanticTokenType::FUNCTION,
         )));
 
         let bound = source.find("320").expect("array bound");
@@ -279,23 +301,34 @@ mod tests {
             let offset = source
                 .find(name)
                 .unwrap_or_else(|| panic!("missing {name}"));
-            assert!(decoded.contains(&expected(source, offset, name, token_type::FUNCTION,)));
+
+            assert!(decoded.contains(&expected(
+                source,
+                offset,
+                name,
+                &SemanticTokenType::FUNCTION
+            )));
         }
 
         for offset in [
             source.find("step, 2").unwrap(),
             source.rfind("step").unwrap(),
         ] {
-            assert!(decoded.contains(&expected(source, offset, "step", token_type::FUNCTION,)));
+            assert!(decoded.contains(&expected(
+                source,
+                offset,
+                "step",
+                &SemanticTokenType::FUNCTION
+            )));
         }
 
         let jet = source.find("jet::add_32").unwrap();
-        assert!(decoded.contains(&expected(source, jet, "jet", token_type::NAMESPACE)));
+        assert!(decoded.contains(&expected(source, jet, "jet", &SemanticTokenType::NAMESPACE)));
         assert!(decoded.contains(&expected(
             source,
             jet + "jet::".len(),
             "add_32",
-            token_type::FUNCTION,
+            &SemanticTokenType::FUNCTION
         )));
     }
 }

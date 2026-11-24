@@ -7,6 +7,7 @@ node_modules/
 out/
 
 .pnpm-debug.log
+.DS_Store
 
 *.ast 
 dist/
