@@ -394,3 +394,114 @@ fn missing_configured_manifest_is_an_analysis_diagnostic() {
             .to_string()
             .contains("Simplex manifest was not found")));
 }
+
+fn invalid_program_on_parsing() -> &'static str {
+    "fn add(a: u32, b: u32) -> u32 "
+}
+
+fn parse_program(
+    source: &str,
+    path: &Path,
+    settings: &Settings,
+    workspace_roots: &[PathBuf],
+) -> (Vec<CompilerDiagnostic>, Option<AnalysisSnapshot>) {
+    let snapshot = AnalysisSnapshot::analyze(source, path, settings, workspace_roots);
+    let mut syntax_diagnostics = DiagnosticManager::new();
+
+    let parsed = parse::Program::parse_from_str_with_errors(
+        0,
+        source,
+        &settings.unstable_features(),
+        &mut syntax_diagnostics,
+    )
+    .is_some();
+
+    let diagnostics = snapshot.compiler_diagnostics.clone();
+
+    (diagnostics, parsed.then_some(snapshot))
+}
+
+#[test]
+fn duplicate_imported_main_points_to_the_import() {
+    let temp = TempDir::new().expect("temp dir");
+    let root = temp.path();
+    fs::write(root.join("Simplex.toml"), "").expect("write manifest");
+    fs::create_dir(root.join("simf")).expect("create source dir");
+    fs::write(
+        root.join("simf/library.simf"),
+        "pub fn helper() {}\nfn main() {}\n",
+    )
+    .expect("write imported module");
+
+    let import = "use crate::library::helper;";
+    let source = format!("{import}\nfn main() {{}}\n");
+    let path = root.join("simf/main.simf");
+    fs::write(&path, &source).expect("write entry file");
+    let settings = Settings::from_json(serde_json::json!({
+        "experimentalFeatures": { "imports": true }
+    }))
+    .expect("valid settings");
+
+    let (errors, _) = parse_program(&source, &path, &settings, &[root.to_path_buf()]);
+    let duplicate_main = errors
+        .iter()
+        .find(|error| {
+            matches!(
+                error.error(),
+                CompilerError::FunctionRedefined { name } if name.as_str() == "main"
+            )
+        })
+        .expect("duplicate main diagnostic");
+
+    let CompilerLocation::Code(span) = duplicate_main.location() else {
+        panic!("duplicate main should point to source code");
+    };
+    assert_eq!(span.to_slice(&source), Some(import));
+}
+
+#[test]
+fn test_parse_program_invalid_parse() {
+    let (temp, path) = temp_project(invalid_program_on_parsing());
+    let (err, doc) = parse_program(
+        invalid_program_on_parsing(),
+        &path,
+        &Settings::default(),
+        &[temp.path().to_path_buf()],
+    );
+    match err
+        .first()
+        .expect("program should produce an error")
+        .error()
+        .clone()
+    {
+        CompilerError::Syntax { .. } => {}
+        _ => panic!("Expected `Syntax` error"),
+    }
+
+    assert!(doc.is_none(), "Expected no document to return");
+}
+
+fn invalid_program_on_ast() -> &'static str {
+    "fn add(a: u32, b: u32) -> u32 {}
+     fn main() {}"
+}
+
+#[test]
+#[ignore = "TODO we need to also create a file with a path so that could work"]
+fn test_parse_program_invalid_ast() {
+    let (temp, path) = temp_project(invalid_program_on_ast());
+    let (err, doc) = parse_program(
+        invalid_program_on_ast(),
+        &path,
+        &Settings::default(),
+        &[temp.path().to_path_buf()],
+    );
+    assert!(
+        err.first()
+            .expect("program should produce an error")
+            .to_string()
+            .contains("Expected expression of type `u32`, found type `()`"),
+        "Expected error on return type"
+    );
+    assert!(doc.is_some(), "Expected problem in AST build, not parse");
+}
