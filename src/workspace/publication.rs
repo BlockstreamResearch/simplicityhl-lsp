@@ -92,9 +92,9 @@ impl WorkspaceState {
                 continue;
             };
 
-            for diagnostic in contributed {
-                if !diagnostics.contains(diagnostic) {
-                    diagnostics.push(diagnostic.clone());
+            for diag in contributed {
+                if !diagnostics.contains(diag) {
+                    diagnostics.push(diag.clone());
                 }
             }
         }

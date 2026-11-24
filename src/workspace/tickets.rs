@@ -122,6 +122,9 @@ impl WorkspaceState {
     }
 
     fn is_current(&self, uri: &Uri, generation: AnalysisGeneration, open: bool) -> bool {
+        // `state.text.is_some() == open` is need to understand that currently we inside file
+        // and we can get text from it. If it is not true, then code can break because we do not load the text.
+        // Currently this situation is impossible, but it's safe guard for future.
         self.documents
             .get(uri)
             .is_some_and(|state| state.generation == generation && state.text.is_some() == open)
