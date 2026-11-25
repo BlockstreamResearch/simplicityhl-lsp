@@ -41,6 +41,7 @@ pub(crate) fn complete_import(
     source: &str,
     current_path: &Path,
     project: &ProjectContext,
+    features: &UnstableFeatures,
 ) -> Vec<CompletionItem> {
     let candidates = match &context.query {
         Query::Roots => root_candidates(project, current_path),
@@ -53,13 +54,18 @@ pub(crate) fn complete_import(
             };
 
             let source_before_use = source.get(..context.use_start).unwrap_or_default();
-            let mut candidates =
-                candidates_at(root, relative_segments, current_path, source_before_use);
+            let mut candidates = candidates_at(
+                root,
+                relative_segments,
+                current_path,
+                source_before_use,
+                features,
+            );
 
             // Top-level items in the current file are already in scope, but its inline modules
             // are useful path segments. Parse only the complete text before the unfinished use.
             if root_alias == "crate" && relative_segments.is_empty() {
-                candidates.extend(parse_inline_module_candidates(source_before_use));
+                candidates.extend(parse_inline_module_candidates(source_before_use, features));
             }
             candidates
         }
@@ -122,6 +128,7 @@ fn candidates_at(
     segments: &[String],
     current_path: &Path,
     source_before_use: &str,
+    features: &UnstableFeatures,
 ) -> Vec<Candidate> {
     let mut cursor = root.to_path_buf();
     for (index, segment) in segments.iter().enumerate() {
@@ -133,13 +140,13 @@ fn candidates_at(
 
         let file = cursor.join(format!("{segment}.simf"));
         if file.is_file() {
-            return parse_file_candidates(&file, &segments[index + 1..]);
+            return parse_file_candidates(&file, &segments[index + 1..], features);
         }
 
         // If filesystem routing never left the package root, `crate::` may instead be
         // navigating inline modules in the current source file.
         if cursor == root {
-            return parse_source_candidates(source_before_use, &segments[index..]);
+            return parse_source_candidates(source_before_use, &segments[index..], features);
         }
         return Vec::new();
     }
@@ -186,34 +193,37 @@ fn canonical(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn parse_file_candidates(path: &Path, inline_segments: &[String]) -> Vec<Candidate> {
+fn parse_file_candidates(
+    path: &Path,
+    inline_segments: &[String],
+    features: &UnstableFeatures,
+) -> Vec<Candidate> {
     let Ok(source) = fs::read_to_string(path) else {
         return Vec::new();
     };
 
-    parse_source_candidates(&source, inline_segments)
+    parse_source_candidates(&source, inline_segments, features)
 }
 
-fn parse_program(source: &str) -> Option<parse::Program> {
+fn parse_program(source: &str, features: &UnstableFeatures) -> Option<parse::Program> {
     let mut diagnostics = DiagnosticManager::new();
-    parse::Program::parse_from_str_with_errors(
-        0,
-        source,
-        &UnstableFeatures::all(),
-        &mut diagnostics,
-    )
+    parse::Program::parse_from_str_with_errors(0, source, features, &mut diagnostics)
 }
 
-fn parse_source_candidates(source: &str, inline_segments: &[String]) -> Vec<Candidate> {
-    let Some(program) = parse_program(source) else {
+fn parse_source_candidates(
+    source: &str,
+    inline_segments: &[String],
+    features: &UnstableFeatures,
+) -> Vec<Candidate> {
+    let Some(program) = parse_program(source, features) else {
         return Vec::new();
     };
 
     candidates_from_items(program.items(), source, inline_segments)
 }
 
-fn parse_inline_module_candidates(source: &str) -> Vec<Candidate> {
-    let Some(program) = parse_program(source) else {
+fn parse_inline_module_candidates(source: &str, features: &UnstableFeatures) -> Vec<Candidate> {
+    let Some(program) = parse_program(source, features) else {
         return Vec::new();
     };
 

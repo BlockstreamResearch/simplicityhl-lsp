@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 
+use simplicityhl::UnstableFeatures;
 use tempfile::TempDir;
 
 use super::context::Query;
@@ -26,7 +27,7 @@ fn labels_for(root: &Path, source: &str) -> Vec<String> {
     )
     .unwrap();
     let context = ImportCompletionContext::at(source, source.len()).expect("import context");
-    complete_import(&context, source, root, &project)
+    complete_import(&context, source, root, &project, &UnstableFeatures::all())
         .into_iter()
         .map(|item| item.label)
         .collect()
@@ -135,7 +136,7 @@ fn function_completion_includes_signature_and_documentation() {
     )
     .unwrap();
     let context = ImportCompletionContext::at(source, source.len()).unwrap();
-    let items = complete_import(&context, source, &root, &project);
+    let items = complete_import(&context, source, &root, &project, &UnstableFeatures::all());
 
     assert_eq!(
         items[0].detail.as_deref(),

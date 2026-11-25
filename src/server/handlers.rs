@@ -433,7 +433,7 @@ impl Backend {
         context: &ImportCompletionContext,
     ) -> Option<Vec<CompletionItem>> {
         let path = uri.to_file_path()?;
-        let (project_settings, workspace_roots) = {
+        let (project_settings, workspace_roots, features) = {
             let config = self.config.read().await;
             if !config.settings.experimental_features.imports {
                 return None;
@@ -441,12 +441,15 @@ impl Backend {
             (
                 config.settings.project.clone(),
                 config.workspace_roots.clone(),
+                config.settings.unstable_features(),
             )
         };
 
         Some(
             ProjectContext::discover(path.as_ref(), &project_settings, &workspace_roots)
-                .map(|project| imports::complete_import(context, source, path.as_ref(), &project))
+                .map(|project| {
+                    imports::complete_import(context, source, path.as_ref(), &project, &features)
+                })
                 .unwrap_or_default(),
         )
     }
