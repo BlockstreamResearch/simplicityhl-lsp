@@ -5,9 +5,7 @@ pub struct FunctionTemplate {
     pub display_name: String,
     /// Generic type parameters to include and use with snippet base
     pub generics: Vec<String>,
-    /// Function arguments
     pub args: Vec<String>,
-    /// Return type
     pub return_type: String,
     /// Documentation
     pub description: String,
@@ -26,6 +24,7 @@ impl FunctionTemplate {
     ) -> Self {
         let name = display_name.into();
         let snippet = Self::get_snippet_name(&name, &generics);
+
         Self {
             display_name: name,
             generics,
@@ -50,19 +49,19 @@ impl FunctionTemplate {
     /// Get snippet for function
     pub fn get_snippet_name(name: &str, generics: &[String]) -> String {
         if generics.is_empty() {
-            name.to_string()
-        } else {
-            format!(
-                "{}::<{}>",
-                name,
-                generics
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| { format!("${{{}:{}}}", index + 1, item) })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
+            return name.to_string();
         }
+
+        format!(
+            "{}::<{}>",
+            name,
+            generics
+                .iter()
+                .enumerate()
+                .map(|(index, item)| { format!("${{{}:{}}}", index + 1, item) })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 
     /// Get text, which would inserted when completion triggered
