@@ -1,8 +1,6 @@
-//! Project- and source-backed candidates for incomplete import declarations.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ropey::Rope;
 use simplicityhl::error::DiagnosticManager;
@@ -153,52 +151,46 @@ fn list_directory(directory: &Path, current_path: &Path) -> Vec<Candidate> {
     let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
     };
-    let canonical_current =
-        fs::canonicalize(current_path).unwrap_or_else(|_| current_path.to_path_buf());
+    let canonical_current = canonical(current_path);
 
     entries
         .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let canonical_path = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            if canonical_path == canonical_current {
-                return None;
-            }
-            if path.is_dir() {
-                return path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| is_identifier(name))
-                    .map(|name| {
-                        Candidate::plain(
-                            name,
-                            CompletionItemKind::MODULE,
-                            format!("Module directory `{}`", path.display()),
-                        )
-                    });
-            }
-
-            (path
-                .extension()
-                .is_some_and(|extension| extension == "simf"))
-            .then(|| path.file_stem().and_then(|name| name.to_str()))
-            .flatten()
-            .filter(|name| is_identifier(name))
-            .map(|name| {
-                Candidate::plain(
-                    name,
-                    CompletionItemKind::MODULE,
-                    format!("Module file `{}`", path.display()),
-                )
-            })
-        })
+        .map(|entry| entry.path())
+        .filter(|path| canonical(path) != canonical_current)
+        .filter_map(|path| module_candidate(&path))
         .collect()
+}
+
+/// A directory or `.simf` file whose name can be a `use` path segment.
+fn module_candidate(path: &Path) -> Option<Candidate> {
+    let (name, kind) = if path.is_dir() {
+        (path.file_name()?, "directory")
+    } else if path
+        .extension()
+        .is_some_and(|extension| extension == "simf")
+    {
+        (path.file_stem()?, "file")
+    } else {
+        return None;
+    };
+    let name = name.to_str().filter(|name| is_identifier(name))?;
+
+    Some(Candidate::plain(
+        name,
+        CompletionItemKind::MODULE,
+        format!("Module {kind} `{}`", path.display()),
+    ))
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn parse_file_candidates(path: &Path, inline_segments: &[String]) -> Vec<Candidate> {
     let Ok(source) = fs::read_to_string(path) else {
         return Vec::new();
     };
+
     parse_source_candidates(&source, inline_segments)
 }
 
@@ -216,6 +208,7 @@ fn parse_source_candidates(source: &str, inline_segments: &[String]) -> Vec<Cand
     let Some(program) = parse_program(source) else {
         return Vec::new();
     };
+
     candidates_from_items(program.items(), source, inline_segments)
 }
 
@@ -244,82 +237,90 @@ fn candidates_from_items(
     inline_segments: &[String],
 ) -> Vec<Candidate> {
     if let Some((segment, rest)) = inline_segments.split_first() {
-        let Some(module) = items.iter().find_map(|item| match item {
-            parse::Item::Module(module) if module.name().as_str() == segment => Some(module),
-            _ => None,
-        }) else {
-            return Vec::new();
-        };
-        return candidates_from_items(module.items(), source, rest);
+        return items
+            .iter()
+            .find_map(|item| match item {
+                parse::Item::Module(module) if module.name().as_str() == segment => Some(module),
+                _ => None,
+            })
+            .map(|module| candidates_from_items(module.items(), source, rest))
+            .unwrap_or_default();
     }
 
     let rope = Rope::from_str(source);
-    let mut candidates = Vec::new();
-    for item in items {
-        match item {
-            parse::Item::Function(function)
-                if matches!(function.visibility(), Visibility::Public) =>
-            {
-                let start_line = offset_to_position(function.span().start, &rope)
-                    .unwrap_or_default()
-                    .line;
-                let documentation = get_comments_from_lines(start_line, &rope);
-                let template = completion::function_to_template(function, &documentation);
-                candidates.push(Candidate {
-                    name: function.name().to_string(),
-                    kind: CompletionItemKind::FUNCTION,
-                    detail: template.get_signature(),
-                    documentation: (!documentation.is_empty()).then_some(
-                        Documentation::MarkupContent(MarkupContent {
-                            kind: MarkupKind::Markdown,
-                            value: documentation,
-                        }),
-                    ),
-                });
-            }
-            parse::Item::TypeAlias(alias) if matches!(alias.visibility(), Visibility::Public) => {
-                candidates.push(Candidate::plain(
-                    alias.name().to_string(),
-                    CompletionItemKind::TYPE_PARAMETER,
-                    format!("type {} = {}", alias.name(), alias.ty()),
-                ));
-            }
-            parse::Item::EnumDeclaration(declaration)
-                if matches!(declaration.visibility(), Visibility::Public) =>
-            {
-                candidates.push(Candidate::plain(
-                    declaration.name().to_string(),
-                    CompletionItemKind::ENUM,
-                    format!("enum {}", declaration.name()),
-                ));
-            }
-            parse::Item::Module(module) if matches!(module.visibility(), Visibility::Public) => {
-                candidates.push(Candidate::plain(
-                    module.name().to_string(),
-                    CompletionItemKind::MODULE,
-                    "Public inline module",
-                ));
-            }
-            parse::Item::Use(use_decl) if matches!(use_decl.visibility(), Visibility::Public) => {
-                let items = match use_decl.items() {
-                    parse::UseItems::Single(item) => std::slice::from_ref(item),
-                    parse::UseItems::List(items) => items.as_slice(),
-                };
-                candidates.extend(items.iter().map(|(original, alias)| {
+    items
+        .iter()
+        .flat_map(|item| item_candidates(item, &rope))
+        .collect()
+}
+
+/// The names a `pub` item makes importable.
+fn item_candidates(item: &parse::Item, rope: &Rope) -> Vec<Candidate> {
+    let public = |visibility: &Visibility| matches!(visibility, Visibility::Public);
+
+    match item {
+        parse::Item::Function(function) if public(function.visibility()) => {
+            vec![function_candidate(function, rope)]
+        }
+        parse::Item::TypeAlias(alias) if public(alias.visibility()) => vec![Candidate::plain(
+            alias.name().to_string(),
+            CompletionItemKind::TYPE_PARAMETER,
+            format!("type {} = {}", alias.name(), alias.ty()),
+        )],
+        parse::Item::EnumDeclaration(declaration) if public(declaration.visibility()) => {
+            vec![Candidate::plain(
+                declaration.name().to_string(),
+                CompletionItemKind::ENUM,
+                format!("enum {}", declaration.name()),
+            )]
+        }
+        parse::Item::Module(module) if public(module.visibility()) => vec![Candidate::plain(
+            module.name().to_string(),
+            CompletionItemKind::MODULE,
+            "Public inline module",
+        )],
+        parse::Item::Use(use_decl) if public(use_decl.visibility()) => {
+            let items = match use_decl.items() {
+                parse::UseItems::Single(item) => std::slice::from_ref(item),
+                parse::UseItems::List(items) => items.as_slice(),
+            };
+            items
+                .iter()
+                .map(|(original, alias)| {
                     Candidate::plain(
                         alias.as_ref().unwrap_or(original).to_string(),
                         CompletionItemKind::REFERENCE,
                         "Public re-export",
                     )
-                }));
-            }
-            parse::Item::TypeAlias(_)
-            | parse::Item::Function(_)
-            | parse::Item::Use(_)
-            | parse::Item::EnumDeclaration(_)
-            | parse::Item::Module(_)
-            | parse::Item::Ignored => {}
+                })
+                .collect()
         }
+        parse::Item::TypeAlias(_)
+        | parse::Item::Function(_)
+        | parse::Item::Use(_)
+        | parse::Item::EnumDeclaration(_)
+        | parse::Item::Module(_)
+        | parse::Item::Ignored => Vec::new(),
     }
-    candidates
+}
+
+/// A function with its signature and the doc comments above it.
+fn function_candidate(function: &parse::Function, rope: &Rope) -> Candidate {
+    let start_line = offset_to_position(function.span().start, rope)
+        .unwrap_or_default()
+        .line;
+    let documentation = get_comments_from_lines(start_line, rope);
+    let template = completion::function_to_template(function, &documentation);
+
+    Candidate {
+        name: function.name().to_string(),
+        kind: CompletionItemKind::FUNCTION,
+        detail: template.get_signature(),
+        documentation: (!documentation.is_empty()).then_some(Documentation::MarkupContent(
+            MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: documentation,
+            },
+        )),
+    }
 }
