@@ -3,14 +3,18 @@ on:   # yamllint disable-line rule:truthy
 
 name: Verify signed commits
 
+permissions:
+  contents: read
+
 jobs:
   Check-Signatures:
     name: Check GPG signatures
     runs-on: ubuntu-latest
     steps:
       - name: "Checkout repo"
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           fetch-depth: 0
 
       - name: "Verify all PR commits are signed"

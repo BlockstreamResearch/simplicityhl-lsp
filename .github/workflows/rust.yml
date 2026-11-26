@@ -1,11 +1,18 @@
-on:   # yamllint disable-line rule:truthy
+on:
+  workflow_call:
   pull_request:
   push:
     branches:
       - master
-      - 'test-ci/**'
 
 name: Continuous integration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   Test:
@@ -14,27 +21,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, nightly, msrv]
+        toolchain: [stable, msrv]
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      # Actions are pinned to a commit, since a tag can be moved to other code.
+      # The comment is the release tag that pointed to that commit.
+      - &checkout
+        name: "Checkout repo"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - &setup-rbmt
+        name: "Setup cargo-rbmt"
+        uses: $/.github/actions/setup-rbmt
       - name: "Run tests"
         run: cargo rbmt --lock-file existing test --toolchain ${{ matrix.toolchain }}
 
   Windows:
     name: Test - Windows stable toolchain
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Select toolchain"
-        uses: dtolnay/rust-toolchain@stable
+      - *checkout
+      - name: "Install pinned stable toolchain"
+        shell: bash
+        run: |
+          stable=$(sed -n 's/^stable = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$stable" --profile minimal
+          rustup default "$stable"
       - name: "Run tests"
-        run: cargo test
+        run: cargo test --locked
 
   Check:
     name: Check - ${{ matrix.task }}
@@ -44,22 +58,26 @@ jobs:
       matrix:
         task: [lint, docs, docsrs]
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      - *checkout
+      - *setup-rbmt
       - name: "Run ${{ matrix.task }}"
         run: cargo rbmt --lock-file existing ${{ matrix.task }}
 
   Format:
     name: Format
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      - *checkout
+      - *setup-rbmt
       - name: "Check formatting"
         run: cargo rbmt fmt --check
+
+  Conclusion:
+    name: Conclusion
+    if: always()
+    needs: [Test, Windows, Check, Format]
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Fail if any check did not pass"
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
