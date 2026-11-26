@@ -1,6 +1,6 @@
 use std::fs;
 
-use simplicityhl::UnstableFeatures;
+use simplicityhl::{UnstableFeature, UnstableFeatures};
 use tempfile::TempDir;
 use tower_lsp_server::lsp_types::CompletionItem;
 
@@ -32,7 +32,7 @@ impl Project {
         self
     }
 
-    /// Completion at the end of `source`, saved as `simf/main.simf`.
+    /// Completion at the end of `source`, saved as `simf/main.simf`, with only `imports` enabled.
     fn complete(&self, source: &str) -> Vec<CompletionItem> {
         self.write("simf/main.simf", source);
 
@@ -45,7 +45,8 @@ impl Project {
         .unwrap();
 
         let context = ImportCompletionContext::at(source, source.len()).expect("import context");
-        complete_import(&context, source, &main, &project, &UnstableFeatures::all())
+        let features = UnstableFeatures::new(vec![UnstableFeature::Imports]);
+        complete_import(&context, source, &main, &project, &features)
     }
 
     fn labels(&self, source: &str) -> Vec<String> {
@@ -145,4 +146,25 @@ fn function_completion_includes_signature_and_documentation() {
             }
         }])
     );
+}
+
+/// The target file is parsed with the user's features, as the compiler parses it.
+/// Suppose we have a file with `pub enum Shape { ... }` and `fn area() {}`.
+/// Currently, if enums are off, the `parse_from_str_with_errors` function from `SimplicityHL`
+/// fails and returns `None`, so we cannot autocomplete `area`.
+///
+/// Revisit and change this once `parse_from_str_with_errors`
+/// can work with multiple errors.
+#[test]
+fn file_using_a_disabled_feature_offers_no_items() {
+    let project = Project::new();
+    project
+        .write("simf/plain.simf", "pub fn area() {}\n")
+        .write(
+            "simf/shapes.simf",
+            "pub enum Shape { Circle, Square }\npub fn area() {}\n",
+        );
+
+    assert_eq!(project.labels("use crate::plain::"), vec!["area"]);
+    assert!(project.labels("use crate::shapes::").is_empty());
 }
