@@ -9,40 +9,13 @@ on:
     types: [published]
 
 jobs:
-  lint:
-    name: Lint (lsp)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Rustfmt check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features
-
-  tests:
-    name: Tests (lsp)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run tests
-        run: cargo test --all-features -- --nocapture
+  checks:
+    name: CI
+    uses: ./.github/workflows/rust.yml
 
   publish:
     name: Publish simplicityhl-lsp to crates.io
-    needs: [lint, tests]
+    needs: checks
     runs-on: ubuntu-latest
     environment: release
     concurrency:
@@ -56,10 +29,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Rust (stable)
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
+      - name: Install pinned stable toolchain
+        run: |
+          stable=$(sed -n 's/^stable = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$stable" --profile minimal
+          rustup default "$stable"
 
       - name: Verify tag matches crate version
         shell: bash
