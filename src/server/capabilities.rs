@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use smplx_build::CONFIG_FILENAME;
 use tower_lsp_server::lsp_types::{
     CompletionOptions, FileSystemWatcher, GlobPattern, HoverProviderCapability, InitializeParams,
     InitializeResult, OneOf, SaveOptions, SemanticTokensFullOptions, SemanticTokensOptions,
@@ -20,6 +21,7 @@ pub(super) fn workspace_roots(params: &InitializeParams) -> Vec<PathBuf> {
         .flatten()
         .filter_map(|folder| folder.uri.to_file_path().map(std::borrow::Cow::into_owned))
         .collect::<Vec<_>>();
+
     #[allow(deprecated)]
     if roots.is_empty() {
         if let Some(path) = params
@@ -94,7 +96,7 @@ pub(super) fn initialize_result() -> InitializeResult {
 }
 
 pub(super) fn watched_files() -> Vec<FileSystemWatcher> {
-    ["**/*.simf", "**/Simplex.toml", "**/simplex.toml"]
+    ["**/*.simf", format!("**/{CONFIG_FILENAME}").as_str()]
         .into_iter()
         .map(|glob| FileSystemWatcher {
             glob_pattern: GlobPattern::String(glob.to_string()),

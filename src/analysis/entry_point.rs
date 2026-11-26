@@ -50,18 +50,23 @@ fn imports_main(
                 let Ok(target) = dependencies.resolve_path(current_source.name(), use_decl) else {
                     continue;
                 };
+
                 if &target == current_source.name() {
                     continue;
                 }
+
                 if !visited.insert(target.clone()) {
                     continue;
                 }
+
                 let Some(file_id) = sources.id(&target) else {
                     continue;
                 };
+
                 let Some(source) = sources.content(file_id) else {
                     continue;
                 };
+
                 let mut diagnostics = DiagnosticManager::new();
                 let Some(program) = parse::Program::parse_from_str_with_errors(
                     file_id,
@@ -121,15 +126,19 @@ fn imported_main_spans(
                 let Ok(target) = dependencies.resolve_path(current_source.name(), use_decl) else {
                     continue;
                 };
+
                 if &target == current_source.name() {
                     continue;
                 }
+
                 let Some(file_id) = sources.id(&target) else {
                     continue;
                 };
+
                 let Some(source) = sources.content(file_id) else {
                     continue;
                 };
+
                 let mut diagnostics = DiagnosticManager::new();
                 let Some(program) = parse::Program::parse_from_str_with_errors(
                     file_id,
@@ -139,6 +148,7 @@ fn imported_main_spans(
                 ) else {
                     continue;
                 };
+
                 let imported_source = CanonSourceFile::new(target.clone(), source);
                 if items_contain_main(program.items())
                     || imports_main(
@@ -189,6 +199,7 @@ pub(super) fn remap_imported_main_diagnostics(
     let Some(sources) = diagnostics.sources() else {
         return diagnostics.diagnostics().to_vec();
     };
+
     let mut import_spans = Vec::new();
     imported_main_spans(
         program.items(),
@@ -212,8 +223,10 @@ pub(super) fn remap_imported_main_diagnostics(
             if !is_duplicate_main(diagnostic) {
                 return diagnostic.clone();
             }
+
             let primary_index = duplicate_index.min(import_spans.len() - 1);
             duplicate_index += 1;
+
             let import_span = import_spans[primary_index];
             let mut remapped = match diagnostic.severity() {
                 CompilerSeverity::Error => {
@@ -223,21 +236,26 @@ pub(super) fn remap_imported_main_diagnostics(
                     CompilerDiagnostic::warning(diagnostic.error().clone(), import_span)
                 }
             };
+
             for label in diagnostic.secondary() {
                 remapped = remapped.with_secondary(label.span, label.message.clone());
             }
+
             for (index, span) in import_spans.iter().enumerate() {
                 if index != primary_index {
                     remapped = remapped
                         .with_secondary(*span, "Another imported `main` enters through this use");
                 }
             }
+
             for note in diagnostic.notes() {
                 remapped = remapped.with_note(note.clone());
             }
+
             if let Some(help) = diagnostic.help() {
                 remapped = remapped.with_help(help.clone());
             }
+
             remapped
         })
         .collect()

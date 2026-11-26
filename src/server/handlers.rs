@@ -1,7 +1,6 @@
 use ropey::Rope;
 use serde_json::Value;
 
-use std::str::FromStr;
 use std::sync::Arc;
 
 use tower_lsp_server::jsonrpc::Result;
@@ -10,29 +9,24 @@ use tower_lsp_server::lsp_types::{
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
     DidChangeWatchedFilesRegistrationOptions, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentFormattingParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    ExecuteCommandParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    InitializeParams, InitializeResult, InitializedParams, Location, MarkupContent, MarkupKind,
-    MessageType, Position, Range, ReferenceParams, Registration, SemanticTokens,
-    SemanticTokensParams, SemanticTokensResult, SignatureHelp, SignatureHelpParams, SymbolKind,
-    TextEdit, Uri,
+    DocumentFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, InitializeParams,
+    InitializeResult, InitializedParams, Location, MessageType, Position, Range, ReferenceParams,
+    Registration, SemanticTokens, SemanticTokensParams, SemanticTokensResult, SignatureHelp,
+    SignatureHelpParams, TextEdit, Uri,
 };
 use tower_lsp_server::{LanguageServer, UriExt};
 
-use simplicityhl::parse;
 use smplx_build::CONFIG_FILENAME;
 
 use crate::analysis::AnalysisSnapshot;
-use crate::completion;
 use crate::completion::imports::{self, ImportCompletionContext};
 use crate::config::Settings;
 use crate::error::LspError;
 use crate::format::{self, FormatError};
+use crate::navigation::ReferenceTarget;
 use crate::project::ProjectContext;
-use crate::text::{
-    get_call_span, offset_to_position, position_to_offset, position_to_span, span_contains,
-    span_to_positions,
-};
+use crate::text::{offset_to_position, position_to_offset};
 use crate::workspace::{AnalysisInput, DiagnosticUpdate, WorkspaceState};
 
 use super::capabilities::{initialize_result, watched_files, workspace_roots};
@@ -76,6 +70,7 @@ impl LanguageServer for Backend {
             })
             .ok(),
         };
+
         if let Err(error) = self.client.register_capability(vec![registration]).await {
             self.client
                 .log_message(
@@ -91,22 +86,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
-        {
-            let mut config = self.config.write().await;
-            for removed in params.event.removed {
-                if let Some(path) = removed.uri.to_file_path() {
-                    config.workspace_roots.retain(|root| root != path.as_ref());
-                }
-            }
-            for added in params.event.added {
-                if let Some(path) = added.uri.to_file_path() {
-                    let path = path.into_owned();
-                    if !config.workspace_roots.contains(&path) {
-                        config.workspace_roots.push(path);
-                    }
-                }
-            }
-        }
+        self.config.write().await.apply_folder_change(params.event);
         self.reanalyze_open_documents().await;
     }
 
@@ -138,6 +118,7 @@ impl LanguageServer for Backend {
                         .is_some_and(|name| name.eq_ignore_ascii_case(CONFIG_FILENAME))
             })
         });
+
         if relevant {
             self.reanalyze_open_documents().await;
         }
@@ -151,11 +132,13 @@ impl LanguageServer for Backend {
         if params.text_document.uri.to_file_path().is_none() {
             return;
         }
+
         let input = self.workspace.write().await.begin_open(
             &params.text_document.uri,
             &params.text_document.text,
             Some(params.text_document.version),
         );
+
         self.on_change(input).await;
     }
 
@@ -166,6 +149,7 @@ impl LanguageServer for Backend {
         let Some(change) = params.content_changes.into_iter().next_back() else {
             return;
         };
+
         let Some(input) = self.workspace.write().await.begin_change(
             &params.text_document.uri,
             &change.text,
@@ -173,6 +157,7 @@ impl LanguageServer for Backend {
         ) else {
             return;
         };
+
         self.on_change(input).await;
     }
 
@@ -186,6 +171,7 @@ impl LanguageServer for Backend {
             else {
                 return;
             };
+
             self.on_change(input).await;
         }
     }
@@ -195,23 +181,21 @@ impl LanguageServer for Backend {
         let Some(generation) = self.workspace.write().await.begin_close(&uri) else {
             return;
         };
+
         // Without this the parsed document is retained for the rest of the session and the
         // editor keeps showing the diagnostics published for a file that is no longer open.
         self.run_diagnostic_transaction(|workspace| workspace.remove_if_current(&uri, generation))
             .await;
     }
 
+    /// Semantic highlighting: marks function names and the `jet::` namespace on top of the
+    /// editor's grammar-based colours. Answers from the stored snapshot.
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
-
-        // .wit files don't have semantic tokens
-        if std::path::Path::new(uri.path().as_str())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
-        {
+        if is_witness(uri) {
             return Ok(None);
         }
 
@@ -228,17 +212,14 @@ impl LanguageServer for Backend {
         })))
     }
 
+    /// Structure of file, used by the editor's Outline panel, breadcrumbs and
+    /// "Go to Symbol". Lists only top-level functions defined in this file.
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = &params.text_document.uri;
-
-        // .wit files don't have symbols
-        if std::path::Path::new(uri.path().as_str())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
-        {
+        if is_witness(uri) {
             return Ok(None);
         }
 
@@ -249,49 +230,7 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let functions = doc.functions.iter();
-
-        let symbols: Vec<DocumentSymbol> = functions
-            .filter_map(|func| {
-                if func.span().file_id != 0 {
-                    return None;
-                }
-
-                // Get the full function range
-                let (start, end) = span_to_positions(func.span(), &doc.text).ok()?;
-                let full_range = Range { start, end };
-
-                // Get the function name range for selection
-                let selection_range = doc.find_function_name_range(func).ok()?;
-
-                // Build parameters detail string
-                let params_str = func
-                    .params()
-                    .iter()
-                    .map(|p| format!("{p}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-
-                let return_type = match func.ret() {
-                    Some(ret) => format!("{ret}"),
-                    None => "()".to_string(),
-                };
-
-                #[allow(deprecated)]
-                Some(DocumentSymbol {
-                    name: func.name().to_string(),
-                    detail: Some(format!("fn({params_str}) -> {return_type}")),
-                    kind: SymbolKind::FUNCTION,
-                    tags: None,
-                    range: full_range,
-                    selection_range,
-                    children: None,
-                    deprecated: None,
-                })
-            })
-            .collect();
-
-        Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+        Ok(Some(DocumentSymbolResponse::Nested(doc.document_symbols())))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -342,6 +281,7 @@ impl LanguageServer for Backend {
         }
     }
 
+    /// Add list of functions which we can use during typing it's name
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
         let documents = self.workspace.read().await;
         let uri = &params.text_document_position_params.text_document.uri;
@@ -360,17 +300,22 @@ impl LanguageServer for Backend {
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
+
         let (source_prefix, functions) = {
             let documents = self.workspace.read().await;
+
             let Some(doc) = documents.get(uri) else {
                 return Ok(None);
             };
+
             let Ok(offset) = position_to_offset(pos, &doc.text) else {
                 return Ok(None);
             };
+
             let Some(prefix) = doc.text.get_byte_slice(..offset) else {
                 return Ok(None);
             };
+
             (prefix.to_string(), doc.functions.clone())
         };
 
@@ -405,12 +350,7 @@ impl LanguageServer for Backend {
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let uri = &params.text_document_position_params.text_document.uri;
-
-        // .wit files don't have hover info
-        if std::path::Path::new(uri.path().as_str())
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
-        {
+        if is_witness(uri) {
             return Ok(None);
         }
 
@@ -421,68 +361,10 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let token_pos = params.text_document_position_params.position;
-
-        let token_span = position_to_span(token_pos, &doc.text)?;
-        let Some(call) = doc.find_related_call(token_span) else {
-            return Ok(None);
-        };
-
-        let call_span = get_call_span(call);
-        let (start, end) = span_to_positions(&call_span, &doc.text)?;
-
-        let description = match call.name() {
-            parse::CallName::Jet(jet) => {
-                let Ok(element) =
-                    simplicityhl::simplicity::jet::Elements::from_str(format!("{jet}").as_str())
-                else {
-                    return Ok(None);
-                };
-
-                let template = completion::jet::jet_to_template(element);
-                format!(
-                    "Jet function\n```simplicityhl\nfn {}({}) -> {}\n```\n---\n\n{}",
-                    template.display_name,
-                    template.args.join(", "),
-                    template.return_type,
-                    template.description
-                )
-            }
-            parse::CallName::Custom(func) => {
-                let Some((function, function_doc)) = doc.functions.get(func.as_str()) else {
-                    return Ok(None);
-                };
-
-                let template = completion::function_to_template(function, function_doc);
-                format!(
-                    "```simplicityhl\nfn {}({}) -> {}\n```\n---\n{}",
-                    template.display_name,
-                    template.args.join(", "),
-                    template.return_type,
-                    template.description
-                )
-            }
-            other => {
-                let Some(template) = completion::builtin::match_callname(other) else {
-                    return Ok(None);
-                };
-                format!(
-                    "Built-in function\n```simplicityhl\nfn {}({}) -> {}\n```\n---\n{}",
-                    template.display_name,
-                    template.args.join(", "),
-                    template.return_type,
-                    template.description
-                )
-            }
-        };
-
-        Ok(Some(Hover {
-            contents: tower_lsp_server::lsp_types::HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: description,
-            }),
-            range: Some(Range { start, end }),
-        }))
+        Ok(crate::hover::at(
+            doc,
+            params.text_document_position_params.position,
+        )?)
     }
 
     async fn goto_definition(
@@ -496,6 +378,7 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
+
         Ok(doc.definition_at(uri, params.text_document_position_params.position)?)
     }
 
@@ -506,44 +389,21 @@ impl LanguageServer for Backend {
         let Some(doc) = documents.get(uri) else {
             return Ok(None);
         };
-        let token_position = params.text_document_position.position;
 
-        let token_span = position_to_span(token_position, &doc.text)?;
-
-        let call_name = doc
-            .find_related_call(token_span)
-            .map(simplicityhl::parse::Call::name);
-
-        match call_name {
-            Some(parse::CallName::Custom(_)) | None => {}
-            Some(name) => {
-                return Ok(Some(doc.find_all_references(name)?));
+        match doc.reference_target(params.text_document_position.position)? {
+            None => Ok(None),
+            Some(ReferenceTarget::Name(name)) => Ok(Some(doc.find_all_references(name)?)),
+            Some(ReferenceTarget::Function(identity)) => {
+                Ok(Some(documents.find_references_to(&identity)))
             }
         }
-
-        let Some(func) = (match call_name {
-            Some(parse::CallName::Custom(name)) => doc.functions.get_func(name.as_str()),
-            _ => doc
-                .functions
-                .iter()
-                .find(|func| span_contains(func.span(), &token_span)),
-        }) else {
-            return Ok(None);
-        };
-
-        if call_name.is_none() {
-            let range = doc.find_function_name_range(func)?;
-            if !(range.start..=range.end).contains(&token_position) {
-                return Ok(None);
-            }
-        }
-
-        let Some(identity) = doc.function_identity(func) else {
-            return Ok(None);
-        };
-
-        Ok(Some(documents.find_references_to(&identity)))
     }
+}
+
+fn is_witness(uri: &Uri) -> bool {
+    std::path::Path::new(uri.path().as_str())
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("wit"))
 }
 
 impl Backend {
@@ -573,7 +433,7 @@ impl Backend {
         context: &ImportCompletionContext,
     ) -> Option<Vec<CompletionItem>> {
         let path = uri.to_file_path()?;
-        let (project_settings, workspace_roots) = {
+        let (project_settings, workspace_roots, features) = {
             let config = self.config.read().await;
             if !config.settings.experimental_features.imports {
                 return None;
@@ -581,12 +441,15 @@ impl Backend {
             (
                 config.settings.project.clone(),
                 config.workspace_roots.clone(),
+                config.settings.unstable_features(),
             )
         };
 
         Some(
             ProjectContext::discover(path.as_ref(), &project_settings, &workspace_roots)
-                .map(|project| imports::complete_import(context, source, path.as_ref(), &project))
+                .map(|project| {
+                    imports::complete_import(context, source, path.as_ref(), &project, &features)
+                })
                 .unwrap_or_default(),
         )
     }
@@ -620,6 +483,11 @@ impl Backend {
             let config = self.config.read().await;
             (config.settings.clone(), config.workspace_roots.clone())
         };
+
+        // NOTE: `analyze` is synchronous, and tower-lsp-server polls every handler in one task,
+        // so hover, completion, etc. wait until it returns. Small contracts analyze quickly
+        // enough today. If this becomes slow, run it in `spawn_blocking` and debounce
+        // `did_change`.
         let snapshot = AnalysisSnapshot::analyze(&params.text, path, &settings, &workspace_roots);
         self.run_diagnostic_transaction(|workspace| {
             workspace.replace_if_current(&params.uri, snapshot, params.version, params.generation)

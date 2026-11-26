@@ -1,6 +1,8 @@
 mod entry_point;
 mod resolution;
 mod sources;
+#[cfg(test)]
+mod tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -17,6 +19,7 @@ use simplicityhl::{parse, TemplateAst};
 use tower_lsp_server::lsp_types::Uri;
 use tower_lsp_server::UriExt;
 
+pub(crate) use resolution::use_items;
 pub use sources::{Functions, SourceSet};
 
 use self::resolution::collect_use_declarations;
@@ -27,11 +30,17 @@ use crate::text::{get_comments_from_lines, offset_to_position};
 /// Immutable result of analyzing one open root document.
 #[derive(Debug)]
 pub struct AnalysisSnapshot {
+    /// Names visible at the root's top level.
     pub functions: Functions,
     pub use_declarations: Vec<parse::UseDecl>,
+    /// Maps a span's `file_id` to the URI and text of the file it belongs to.
     pub sources: SourceSet,
+    /// The root file's text this snapshot was analyzed from;
+    /// positions are converted against it.
     pub text: Rope,
+    /// Compiler errors and warnings, for the root and the files it imports.
     pub compiler_diagnostics: Vec<CompilerDiagnostic>,
+    /// Calls are resolved in the scope where they're written (see `resolve_custom_call`)
     call_scopes: HashMap<Span, Arc<HashMap<String, parse::Function>>>,
 }
 
@@ -57,14 +66,10 @@ impl AnalysisSnapshot {
             parse::Item::Function(function) => Some(function),
             _ => None,
         }) {
-            let start_line = offset_to_position(function.span().start, &analysis.text)
-                .unwrap_or_default()
-                .line;
-            analysis.functions.insert(
-                function.name().to_string(),
-                function.clone(),
-                get_comments_from_lines(start_line, &analysis.text),
-            );
+            let documentation = documentation(function, &analysis.text);
+            analysis
+                .functions
+                .insert(function.name().to_string(), function.clone(), documentation);
         }
 
         analysis
@@ -100,27 +105,11 @@ impl AnalysisSnapshot {
             .and_then(|project| project.dependency_map(path))
         {
             Ok(dependencies) => dependencies,
-            Err(err) => {
-                diagnostics.push(CompilerDiagnostic::new(
-                    CompilerError::CannotParse {
-                        msg: err.to_string(),
-                    },
-                    Span::new(0, 0..0),
-                ));
-                snapshot.compiler_diagnostics = diagnostics.diagnostics().to_vec();
-                return snapshot;
-            }
+            Err(error) => return snapshot.stopped(diagnostics, error.to_string()),
         };
         let canonical_source: CanonSourceFile = match source_file.try_into() {
             Ok(source) => source,
-            Err(error) => {
-                diagnostics.push(CompilerDiagnostic::new(
-                    CompilerError::CannotParse { msg: error },
-                    Span::new(0, 0..0),
-                ));
-                snapshot.compiler_diagnostics = diagnostics.diagnostics().to_vec();
-                return snapshot;
-            }
+            Err(error) => return snapshot.stopped(diagnostics, error),
         };
 
         // The compiler requires an entry point, while editors also analyze library files.
@@ -153,7 +142,23 @@ impl AnalysisSnapshot {
 
         snapshot
     }
+
+    /// End an analysis that stopped before type checking, with `message` at the top of the file.
+    fn stopped(mut self, mut diagnostics: DiagnosticManager, message: String) -> Self {
+        diagnostics.push(CompilerDiagnostic::new(
+            CompilerError::CannotParse { msg: message },
+            Span::new(0, 0..0),
+        ));
+
+        self.compiler_diagnostics = diagnostics.diagnostics().to_vec();
+        self
+    }
 }
 
-#[cfg(test)]
-mod tests;
+/// The doc comments above `function` in `text`.
+fn documentation(function: &parse::Function, text: &Rope) -> String {
+    let start_line = offset_to_position(function.span().start, text)
+        .unwrap_or_default()
+        .line;
+    get_comments_from_lines(start_line, text)
+}

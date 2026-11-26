@@ -1,112 +1,121 @@
 use std::fs;
-use std::path::Path;
 
+use simplicityhl::{UnstableFeature, UnstableFeatures};
 use tempfile::TempDir;
+use tower_lsp_server::lsp_types::CompletionItem;
 
 use super::context::Query;
 use super::*;
 use crate::config::ProjectSettings;
 use crate::project::ProjectContext;
 
-fn write(path: &Path, source: &str) {
-    fs::create_dir_all(path.parent().expect("test file has a parent")).unwrap();
-    fs::write(path, source).unwrap();
+/// A temporary Simplex project with an empty `Simplex.toml`, completing in `simf/main.simf`.
+struct Project {
+    temp: TempDir,
 }
 
-fn labels_for(root: &Path, source: &str) -> Vec<String> {
-    write(root, source);
-    let project = ProjectContext::discover(
-        root,
-        &ProjectSettings::default(),
-        &[root
-            .parent()
-            .and_then(Path::parent)
-            .expect("source has a project root")
-            .to_path_buf()],
-    )
-    .unwrap();
-    let context = ImportCompletionContext::at(source, source.len()).expect("import context");
-    complete_import(&context, source, root, &project)
-        .into_iter()
-        .map(|item| item.label)
-        .collect()
+impl Project {
+    fn new() -> Self {
+        let project = Self {
+            temp: TempDir::new().unwrap(),
+        };
+        project.write("Simplex.toml", "");
+        project
+    }
+
+    fn write(&self, relative_path: &str, source: &str) -> &Self {
+        let path = self.temp.path().join(relative_path);
+
+        fs::create_dir_all(path.parent().expect("path has a parent")).unwrap();
+        fs::write(path, source).unwrap();
+
+        self
+    }
+
+    /// Completion at the end of `source`, saved as `simf/main.simf`, with only `imports` enabled.
+    fn complete(&self, source: &str) -> Vec<CompletionItem> {
+        self.write("simf/main.simf", source);
+
+        let main = self.temp.path().join("simf/main.simf");
+        let project = ProjectContext::discover(
+            &main,
+            &ProjectSettings::default(),
+            &[self.temp.path().to_path_buf()],
+        )
+        .unwrap();
+
+        let context = ImportCompletionContext::at(source, source.len()).expect("import context");
+        let features = UnstableFeatures::new(vec![UnstableFeature::Imports]);
+        complete_import(&context, source, &main, &project, &features)
+    }
+
+    fn labels(&self, source: &str) -> Vec<String> {
+        self.complete(source)
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    }
 }
 
 #[test]
 fn completes_dependency_roots_modules_and_public_functions() {
-    let temp = TempDir::new().unwrap();
-    write(
-        &temp.path().join("Simplex.toml"),
-        "[dependencies]\nstd = { path = 'vendor/std' }\n",
-    );
-    write(&temp.path().join("vendor/std/Simplex.toml"), "");
-    write(
-        &temp.path().join("vendor/std/simf/math.simf"),
-        "// Add two words.\npub fn add(a: u32, b: u32) -> u32 { a }\nfn hidden() {}\n",
-    );
-    let root = temp.path().join("simf/main.simf");
+    let project = Project::new();
+    project
+        .write(
+            "Simplex.toml",
+            "[dependencies]\nstd = { path = 'vendor/std' }\n",
+        )
+        .write("vendor/std/Simplex.toml", "")
+        .write(
+            "vendor/std/simf/math.simf",
+            "// Add two words.\npub fn add(a: u32, b: u32) -> u32 { a }\nfn hidden() {}\n",
+        );
 
-    assert_eq!(labels_for(&root, "use st"), vec!["std"]);
-    assert_eq!(labels_for(&root, "use std::ma"), vec!["math"]);
-    assert_eq!(labels_for(&root, "use std::math::"), vec!["add"]);
+    assert_eq!(project.labels("use st"), vec!["std"]);
+    assert_eq!(project.labels("use std::ma"), vec!["math"]);
+    assert_eq!(project.labels("use std::math::"), vec!["add"]);
 }
 
 #[test]
 fn completes_grouped_imports_without_repeating_selected_items() {
-    let temp = TempDir::new().unwrap();
-    write(&temp.path().join("Simplex.toml"), "");
-    write(
-        &temp.path().join("simf/math.simf"),
-        "pub fn add() {}\npub fn subtract() {}\n",
-    );
-    let root = temp.path().join("simf/main.simf");
+    let project = Project::new();
+    project.write("simf/math.simf", "pub fn add() {}\npub fn subtract() {}\n");
 
-    assert_eq!(
-        labels_for(&root, "use crate::math::{add, "),
-        vec!["subtract"]
-    );
+    assert_eq!(project.labels("use crate::math::{add, "), vec!["subtract"]);
 }
 
 #[test]
 fn completes_current_file_inline_modules() {
-    let temp = TempDir::new().unwrap();
-    write(&temp.path().join("Simplex.toml"), "");
-    let root = temp.path().join("simf/main.simf");
     let source = "pub mod math { pub fn add() {} fn hidden() {} }\nuse crate::math::";
 
-    assert_eq!(labels_for(&root, source), vec!["add"]);
+    assert_eq!(Project::new().labels(source), vec!["add"]);
 }
 
 #[test]
 fn crate_root_excludes_the_current_file_and_its_already_visible_items() {
-    let temp = TempDir::new().unwrap();
-    write(&temp.path().join("Simplex.toml"), "");
-    let root = temp.path().join("simf/main.simf");
     let source = "pub fn helper() {}\nfn hidden() {}\nmod inline_math {}\nuse crate::";
-    let labels = labels_for(&root, source);
+    let labels = Project::new().labels(source);
 
-    assert!(!labels.contains(&"main".to_string()));
-    assert!(!labels.contains(&"helper".to_string()));
-    assert!(!labels.contains(&"hidden".to_string()));
+    for hidden in ["main", "helper", "hidden"] {
+        assert!(!labels.contains(&hidden.to_string()), "{hidden}");
+    }
     assert!(labels.contains(&"inline_math".to_string()));
 }
 
 #[test]
 fn ignores_use_keywords_in_comments() {
-    let source = "fn main() {}\n// use crate::";
-    assert!(ImportCompletionContext::at(source, source.len()).is_none());
-
-    let source = "fn main() {}\n/* use crate:: */";
-    assert!(ImportCompletionContext::at(source, source.len()).is_none());
-
-    let source = "fn main() {}\n/* use crate::";
-    assert!(ImportCompletionContext::at(source, source.len()).is_none());
-
-    let source = "use crate::\n/* unfinished";
-    assert!(ImportCompletionContext::at(source, source.len()).is_none());
-
-    let source = "use crate::\n// unfinished";
-    assert!(ImportCompletionContext::at(source, source.len()).is_none());
+    for source in [
+        "fn main() {}\n// use crate::",
+        "fn main() {}\n/* use crate:: */",
+        "fn main() {}\n/* use crate::",
+        "use crate::\n/* unfinished",
+        "use crate::\n// unfinished",
+    ] {
+        assert!(
+            ImportCompletionContext::at(source, source.len()).is_none(),
+            "{source}"
+        );
+    }
 }
 
 #[test]
@@ -119,32 +128,14 @@ fn malformed_import_paths_do_not_offer_misleading_candidates() {
 
 #[test]
 fn function_completion_includes_signature_and_documentation() {
-    let temp = TempDir::new().unwrap();
-    write(&temp.path().join("Simplex.toml"), "");
-    write(
-        &temp.path().join("simf/math.simf"),
+    let project = Project::new();
+    project.write(
+        "simf/math.simf",
         "/// Add two words.\npub fn add(a: u32, b: u32) -> u32 { a }\n",
     );
-    let root = temp.path().join("simf/main.simf");
-    let source = "use crate::math::";
-    write(&root, source);
-    let project = ProjectContext::discover(
-        &root,
-        &ProjectSettings::default(),
-        &[temp.path().to_path_buf()],
-    )
-    .unwrap();
-    let context = ImportCompletionContext::at(source, source.len()).unwrap();
-    let items = complete_import(&context, source, &root, &project);
 
     assert_eq!(
-        items[0].detail.as_deref(),
-        Some("fn(a: u32, b: u32) -> u32")
-    );
-    assert!(items[0].documentation.is_some());
-    assert!(items[0].insert_text.is_none());
-    assert_eq!(
-        serde_json::to_value(&items).unwrap(),
+        serde_json::to_value(project.complete("use crate::math::")).unwrap(),
         serde_json::json!([{
             "label": "add",
             "kind": 3,
@@ -155,4 +146,25 @@ fn function_completion_includes_signature_and_documentation() {
             }
         }])
     );
+}
+
+/// The target file is parsed with the user's features, as the compiler parses it.
+/// Suppose we have a file with `pub enum Shape { ... }` and `fn area() {}`.
+/// Currently, if enums are off, the `parse_from_str_with_errors` function from `SimplicityHL`
+/// fails and returns `None`, so we cannot autocomplete `area`.
+///
+/// Revisit and change this once `parse_from_str_with_errors`
+/// can work with multiple errors.
+#[test]
+fn file_using_a_disabled_feature_offers_no_items() {
+    let project = Project::new();
+    project
+        .write("simf/plain.simf", "pub fn area() {}\n")
+        .write(
+            "simf/shapes.simf",
+            "pub enum Shape { Circle, Square }\npub fn area() {}\n",
+        );
+
+    assert_eq!(project.labels("use crate::plain::"), vec!["area"]);
+    assert!(project.labels("use crate::shapes::").is_empty());
 }

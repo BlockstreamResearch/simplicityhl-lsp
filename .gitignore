@@ -7,11 +7,13 @@ node_modules/
 out/
 
 .pnpm-debug.log
+.DS_Store
 
 *.ast 
 dist/
 
-# vscode package
+# VSCode
+.vscode/
 *.vsix
 
 # lock files

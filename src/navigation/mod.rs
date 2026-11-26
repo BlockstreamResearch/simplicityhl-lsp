@@ -1,12 +1,16 @@
 mod references;
+mod symbols;
+#[cfg(test)]
+mod tests;
 
-pub(crate) use references::FunctionIdentity;
+pub(crate) use references::{FunctionIdentity, ReferenceTarget};
 
 use miniscript::iter::TreeLike;
-use simplicityhl::parse::{self, CallName};
+use simplicityhl::parse::CallName;
+use simplicityhl::{error, lexer, parse};
 use tower_lsp_server::lsp_types::{self, GotoDefinitionResponse, Location, Position, Range, Uri};
 
-use crate::analysis::AnalysisSnapshot;
+use crate::analysis::{use_items, AnalysisSnapshot};
 use crate::error::LspError;
 use crate::text::{get_call_span, offset_to_position, span_contains, span_to_positions};
 
@@ -18,17 +22,12 @@ impl AnalysisSnapshot {
     ) -> Result<Option<GotoDefinitionResponse>, LspError> {
         let token_span = crate::text::position_to_span(token_position, &self.text)?;
 
+        // The cursor is on an item in a `use` line.
         if let Some(function) = self.find_imported_function(token_span) {
-            let Some(source) = self.sources.get(function.span().file_id) else {
-                return Ok(None);
-            };
-            let (start, end) = span_to_positions(function.as_ref(), &source.text)?;
-            return Ok(Some(GotoDefinitionResponse::from(Location::new(
-                source.uri.clone(),
-                Range::new(start, end),
-            ))));
+            return self.definition_of(function);
         }
 
+        // The cursor is on a function's own name.
         let Some(call) = self.find_related_call(token_span) else {
             let Some(function) = self
                 .functions
@@ -37,35 +36,47 @@ impl AnalysisSnapshot {
             else {
                 return Ok(None);
             };
+
             let range = self.find_function_name_range(function)?;
-            return Ok(
-                (token_position >= range.start && token_position <= range.end)
-                    .then(|| GotoDefinitionResponse::from(Location::new(uri.clone(), range))),
-            );
+            return Ok((range.start..=range.end)
+                .contains(&token_position)
+                .then(|| Location::new(uri.clone(), range).into()));
         };
 
-        let CallName::Custom(name) = call.name() else {
-            return Ok(None);
-        };
-        let Some(function) = self.functions.get_func(name.as_str()) else {
-            return Ok(None);
-        };
+        // The cursor is on a call.
+        match call.name() {
+            CallName::Custom(name) => self
+                .functions
+                .get_func(name.as_str())
+                .map_or(Ok(None), |function| self.definition_of(function)),
+            _ => Ok(None),
+        }
+    }
+
+    /// The whole definition of `function`, in the file it belongs to.
+    fn definition_of(
+        &self,
+        function: &parse::Function,
+    ) -> Result<Option<GotoDefinitionResponse>, LspError> {
         let Some(source) = self.sources.get(function.span().file_id) else {
             return Ok(None);
         };
+
         let (start, end) = span_to_positions(function.as_ref(), &source.text)?;
-        Ok(Some(GotoDefinitionResponse::from(Location::new(
-            source.uri.clone(),
-            Range::new(start, end),
-        ))))
+        Ok(Some(
+            Location::new(source.uri.clone(), Range::new(start, end)).into(),
+        ))
     }
 
     pub fn find_function_name_range(
         &self,
         function: &parse::Function,
     ) -> Result<lsp_types::Range, LspError> {
-        let function_span = function.span();
-        let source = match function_span.file_id {
+        let name = function.name();
+        let span = function.span();
+
+        // The root's text is `self.text`, which every feature converts root positions against.
+        let source = match span.file_id {
             0 => &self.text,
             file_id => {
                 &self
@@ -73,108 +84,83 @@ impl AnalysisSnapshot {
                     .get(file_id)
                     .ok_or_else(|| {
                         LspError::FunctionNotFound(format!(
-                            "Source file for function {} not found",
-                            function.name()
+                            "Source file for function {name} not found"
                         ))
                     })?
                     .text
             }
         };
         let function_source = source
-            .get_byte_slice(function_span.start..function_span.end)
+            .get_byte_slice(span.start..span.end)
             .ok_or_else(|| {
                 LspError::FunctionNotFound(format!(
-                    "Source span for function {} is outside its document",
-                    function.name()
+                    "Source span for function {name} is outside its document"
                 ))
             })?
             .to_string();
-        let (tokens, _) = simplicityhl::lexer::lex(function_span.file_id, &function_source, 0);
-        let Some(tokens) = tokens else {
-            return Err(LspError::FunctionNotFound(format!(
-                "Function with name {} not found",
-                function.name()
-            )));
-        };
+
+        // The parse tree has no span for the name, so find the `fn <name>` tokens in the source.
+        let tokens = lexer::lex(span.file_id, &function_source, 0)
+            .0
+            .ok_or_else(|| {
+                LspError::FunctionNotFound(format!("Function with name {name} not found"))
+            })?;
         let name_span = tokens
             .windows(2)
             .find_map(|pair| match pair {
-                [
-                    (simplicityhl::lexer::Token::Fn, _),
-                    (simplicityhl::lexer::Token::Ident(name), span),
-                ] if *name == function.name().as_str() => Some(*span),
+                [(lexer::Token::Fn, _), (lexer::Token::Ident(ident), ident_span)]
+                    if *ident == name.as_str() =>
+                {
+                    Some(*ident_span)
+                }
                 _ => None,
             })
             .ok_or_else(|| {
                 LspError::FunctionNotFound(format!(
-                    "Function with name {} not found inside its source span",
-                    function.name()
+                    "Function with name {name} not found inside its source span"
                 ))
             })?;
 
-        Ok(lsp_types::Range {
-            start: offset_to_position(function_span.start + name_span.start, source)?,
-            end: offset_to_position(function_span.start + name_span.end, source)?,
-        })
+        Ok(lsp_types::Range::new(
+            offset_to_position(span.start + name_span.start, source)?,
+            offset_to_position(span.start + name_span.end, source)?,
+        ))
     }
 
     /// Resolve the imported function named by a cursor inside a `use` declaration.
-    pub fn find_imported_function(
-        &self,
-        token_span: simplicityhl::error::Span,
-    ) -> Option<&parse::Function> {
+    pub fn find_imported_function(&self, token_span: error::Span) -> Option<&parse::Function> {
         let use_decl = self
             .use_declarations
             .iter()
             .filter(|use_decl| span_contains(use_decl.span(), &token_span))
             .min_by_key(|use_decl| use_decl.span().end - use_decl.span().start)?;
 
+        // Identifiers after `use`, in order: the path segments, then each item and its alias.
         let source = self.text.to_string();
-        let tokens = simplicityhl::lexer::lex(0, &source, 0).0?;
-        let identifiers = tokens
+        let tokens = lexer::lex(0, &source, 0).0?;
+        let selected = tokens
             .iter()
             .filter(|(_, span)| {
                 span.start >= use_decl.span().start && span.end <= use_decl.span().end
             })
-            .skip_while(|(token, _)| !matches!(token, simplicityhl::lexer::Token::Use))
+            .skip_while(|(token, _)| !matches!(token, lexer::Token::Use))
             .skip(1)
-            .filter(|(token, _)| {
-                matches!(
-                    token,
-                    simplicityhl::lexer::Token::Crate | simplicityhl::lexer::Token::Ident(_)
-                )
-            })
-            .collect::<Vec<_>>();
-        let selected_index = identifiers
-            .iter()
+            .filter(|(token, _)| matches!(token, lexer::Token::Crate | lexer::Token::Ident(_)))
             .position(|(_, span)| span_contains(span, &token_span))?;
 
-        let mut item_index = use_decl.path().len();
-        let items = match use_decl.items() {
-            parse::UseItems::Single(item) => std::slice::from_ref(item),
-            parse::UseItems::List(items) => items.as_slice(),
-        };
-        for (original, alias) in items {
-            let selected_original = selected_index == item_index;
-            item_index += 1;
-            let selected_alias = alias.is_some() && selected_index == item_index;
-            if alias.is_some() {
-                item_index += 1;
-            }
-            if selected_original || selected_alias {
-                return self
-                    .functions
-                    .get_func(alias.as_ref().unwrap_or(original).as_str());
-            }
-        }
-        None
+        // Each item takes one identifier, plus one for its alias; both name the local binding.
+        let mut local_names = use_items(use_decl).iter().flat_map(|(original, alias)| {
+            std::iter::repeat_n(
+                alias.as_ref().unwrap_or(original),
+                1 + usize::from(alias.is_some()),
+            )
+        });
+        let local_name = local_names.nth(selected.checked_sub(use_decl.path().len())?)?;
+        self.functions.get_func(local_name.as_str())
     }
 
     /// Find the smallest call whose callable span contains the requested source position.
-    pub fn find_related_call(
-        &self,
-        token_span: simplicityhl::error::Span,
-    ) -> Option<&simplicityhl::parse::Call> {
+    pub fn find_related_call(&self, token_span: error::Span) -> Option<&parse::Call> {
         let function = self.functions.iter().find(|function| {
             function.span().file_id == 0 && span_contains(function.span(), &token_span)
         })?;
@@ -190,6 +176,3 @@ impl AnalysisSnapshot {
             .last()
     }
 }
-
-#[cfg(test)]
-mod tests;

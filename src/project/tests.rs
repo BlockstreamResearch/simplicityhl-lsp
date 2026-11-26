@@ -1,7 +1,9 @@
 use std::fs;
 use tempfile::TempDir;
 
-use crate::config::{ManualDependencyDetails, SimplexSettings};
+use smplx_build::{ArtifactsResolver, CONFIG_FILENAME};
+
+use crate::config::{ManualDependency, ManualDependencyDetails, SimplexSettings};
 
 use super::*;
 

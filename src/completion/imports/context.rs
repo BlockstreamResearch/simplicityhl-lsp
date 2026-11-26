@@ -42,6 +42,7 @@ impl ImportCompletionContext {
             let Some(path) = raw_path.strip_suffix("::") else {
                 return Some(Self::suppressed(use_range.start));
             };
+
             let list_prefix = &declaration[open_brace + 1..];
             let (completed, partial) = list_prefix
                 .rsplit_once(',')
@@ -98,14 +99,15 @@ impl ImportCompletionContext {
             && (segments[0] == "crate" || is_identifier(&segments[0]))
             && segments[1..].iter().all(|segment| is_identifier(segment))
             && is_identifier_prefix(partial);
+        let query = if valid_path {
+            Query::Path(segments)
+        } else {
+            Query::Suppressed
+        };
 
         Self {
             use_start,
-            query: if valid_path {
-                Query::Path(segments)
-            } else {
-                Query::Suppressed
-            },
+            query,
             partial: partial.to_string(),
             already_imported,
         }

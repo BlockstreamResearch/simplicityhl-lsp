@@ -1,16 +1,20 @@
-use std::collections::{BTreeMap, HashSet};
+mod collector;
+mod error;
+mod lookup;
+mod manifest;
+#[cfg(test)]
+mod tests;
+
 use std::fs;
 use std::path::{Path, PathBuf};
-use thiserror::Error;
 
-use simplicityhl::resolution::{DependencyMap, DependencyMapBuilder};
 use simplicityhl::source::CanonPath;
 
-use smplx_build::config::{Dependency, DEFAULT_DEPENDENCY_DIR};
-use smplx_build::error::BuildError;
-use smplx_build::{ArtifactsResolver, BuildConfig, DependencyConfig, CONFIG_FILENAME};
+use crate::config::ProjectSettings;
 
-use crate::config::{ManualDependency, ProjectSettings, SimplexSettings};
+use self::collector::ProjectCollector;
+pub use self::error::ProjectError;
+use self::manifest::{load_manifest, locate_manifest};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DependencyMapping {
@@ -24,54 +28,6 @@ pub struct ProjectContext {
     pub source_root: PathBuf,
     pub dependencies: Vec<DependencyMapping>,
     pub package_roots: Vec<PathBuf>,
-}
-
-#[derive(Debug, Error)]
-pub enum ProjectError {
-    #[error("Unable to read `{path}`: {source}")]
-    Read {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("Invalid Simplex manifest `{path}`: {source}")]
-    Manifest {
-        path: PathBuf,
-        source: Box<BuildError>,
-    },
-    #[error("Unable to resolve `{path}`: {source}")]
-    Canonicalize {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("Configured Simplex manifest was not found at `{0}`")]
-    MissingConfiguredManifest(PathBuf),
-    #[error("Unable to resolve dependency `{name}`: {source}")]
-    Dependency {
-        name: String,
-        source: Box<BuildError>,
-    },
-    #[error("Dependency `{name}` has no `{expected}` in `{root}`", expected = CONFIG_FILENAME)]
-    MissingDependencyManifest { name: String, root: PathBuf },
-    #[error("Dependency `{name}` src_dir resolves outside its package: `{source_dir}` (package root: `{root}`)")]
-    DependencySourceOutsidePackage {
-        name: String,
-        root: PathBuf,
-        source_dir: PathBuf,
-    },
-    #[error("Unable to build compiler dependency mappings: {0}")]
-    Compiler(String),
-}
-
-struct SimplexConfig {
-    build: BuildConfig,
-    dependencies: DependencyConfig,
-}
-
-struct ProjectCollector {
-    install_root: PathBuf,
-    visited: HashSet<PathBuf>,
-    mappings: BTreeMap<(PathBuf, String), PathBuf>,
-    package_roots: HashSet<PathBuf>,
 }
 
 impl ProjectContext {
@@ -96,6 +52,7 @@ impl ProjectContext {
         } else {
             (canonicalize_existing_ancestor(&workspace_root)?, None)
         };
+
         let source_root = if !settings.source_directory.trim().is_empty() {
             resolve_existing(&project_root, &settings.source_directory)?
         } else if let Some(config) = &root_config {
@@ -105,6 +62,7 @@ impl ProjectContext {
                 document_path.parent().unwrap_or(project_root.as_path()),
             )?
         };
+
         let mut collector = ProjectCollector::new(project_root.clone());
         collector.package_roots.insert(source_root.clone());
         if let Some(config) = &root_config {
@@ -112,13 +70,7 @@ impl ProjectContext {
         }
 
         for (alias, dependency) in &settings.dependencies {
-            add_manual_dependency(
-                &mut collector,
-                &project_root,
-                &source_root,
-                alias,
-                dependency,
-            )?;
+            collector.add_manual(&project_root, &source_root, alias, dependency)?;
         }
 
         let mut dependencies = collector
@@ -147,182 +99,6 @@ impl ProjectContext {
             package_roots,
         })
     }
-
-    pub fn dependency_map(&self, document_path: &Path) -> Result<DependencyMap, ProjectError> {
-        let mut builder = DependencyMapBuilder::new();
-        for mapping in &self.dependencies {
-            builder.add_dependency(
-                to_canon(&mapping.context)?,
-                mapping.alias.clone(),
-                to_canon(&mapping.target)?,
-            );
-        }
-
-        let package_root = self.package_root_for(document_path);
-        builder
-            .build(to_canon(package_root)?)
-            .map_err(|error| ProjectError::Compiler(error.to_string()))
-    }
-
-    pub fn package_root_for(&self, document_path: &Path) -> &Path {
-        let canonical_document =
-            fs::canonicalize(document_path).unwrap_or_else(|_| document_path.to_path_buf());
-        self.package_roots
-            .iter()
-            .find(|root| canonical_document.starts_with(root))
-            .map_or(self.source_root.as_path(), PathBuf::as_path)
-    }
-
-    fn visible_mappings<'a>(
-        &'a self,
-        document_path: &Path,
-    ) -> impl Iterator<Item = &'a DependencyMapping> + 'a {
-        let canonical_document =
-            fs::canonicalize(document_path).unwrap_or_else(|_| document_path.to_path_buf());
-        self.dependencies
-            .iter()
-            .filter(move |mapping| canonical_document.starts_with(&mapping.context))
-    }
-
-    /// Resolve the directory an import alias points at, from the perspective of
-    /// `document_path`.
-    pub fn import_root(&self, document_path: &Path, alias: &str) -> Option<&Path> {
-        if alias == "crate" {
-            return Some(self.package_root_for(document_path));
-        }
-
-        self.visible_mappings(document_path)
-            .find(|mapping| mapping.alias == alias)
-            .map(|mapping| mapping.target.as_path())
-    }
-
-    /// Return dependency aliases that are visible from `document_path`.
-    ///
-    /// A package can provide both a broad mapping and a more specific override for the
-    /// same alias. Completion only needs to display that logical alias once; [`Self::import_root`]
-    /// selects the effective target when the user continues the path.
-    pub fn dependency_aliases(&self, document_path: &Path) -> Vec<&str> {
-        let mut aliases = self
-            .visible_mappings(document_path)
-            .map(|mapping| mapping.alias.as_str())
-            .collect::<Vec<_>>();
-        aliases.sort_unstable();
-        aliases.dedup();
-        aliases
-    }
-}
-
-impl ProjectCollector {
-    fn new(install_root: PathBuf) -> Self {
-        Self {
-            install_root,
-            visited: HashSet::new(),
-            mappings: BTreeMap::new(),
-            package_roots: HashSet::new(),
-        }
-    }
-
-    fn collect(
-        &mut self,
-        config: &SimplexConfig,
-        package_root: &Path,
-        source_root: &Path,
-    ) -> Result<(), ProjectError> {
-        self.visited.insert(package_root.to_path_buf());
-
-        // `DependencyConfig` is a HashMap; sort so diagnostics don't depend on iteration order.
-        let mut dependencies = config.dependencies.inner.iter().collect::<Vec<_>>();
-        dependencies.sort_unstable_by_key(|(name, _)| *name);
-
-        for (name, dependency) in dependencies {
-            let dependency_root = self.resolve_dependency(name, dependency, package_root)?;
-            let manifest_path = manifest_in(&dependency_root).ok_or_else(|| {
-                ProjectError::MissingDependencyManifest {
-                    name: name.clone(),
-                    root: dependency_root.clone(),
-                }
-            })?;
-
-            let dependency_config = load_manifest(&manifest_path)?;
-            let dependency_source =
-                canonicalize(&dependency_root.join(&dependency_config.build.src_dir))?;
-
-            // A dependency may only define import contexts inside its own package.
-            if !dependency_source.starts_with(&dependency_root) {
-                return Err(ProjectError::DependencySourceOutsidePackage {
-                    name: name.clone(),
-                    root: dependency_root,
-                    source_dir: dependency_source,
-                });
-            }
-
-            self.mappings.insert(
-                (source_root.to_path_buf(), name.clone()),
-                dependency_source.clone(),
-            );
-            self.package_roots.insert(dependency_source.clone());
-
-            if self.visited.insert(dependency_root.clone()) {
-                self.collect(&dependency_config, &dependency_root, &dependency_source)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn resolve_dependency(
-        &self,
-        name: &str,
-        dependency: &Dependency,
-        package_root: &Path,
-    ) -> Result<PathBuf, ProjectError> {
-        let deps_dir = self.install_root.join(DEFAULT_DEPENDENCY_DIR);
-        ArtifactsResolver::resolve_dep_context(dependency, &to_canon(package_root)?, &deps_dir)
-            .map(|root| root.as_path().to_path_buf())
-            .map_err(|source| ProjectError::Dependency {
-                name: name.to_string(),
-                source: Box::new(source),
-            })
-    }
-}
-
-fn add_manual_dependency(
-    collector: &mut ProjectCollector,
-    project_root: &Path,
-    source_root: &Path,
-    alias: &str,
-    dependency: &ManualDependency,
-) -> Result<(), ProjectError> {
-    let target = resolve_existing(project_root, dependency.path())?;
-    let context = dependency.context().map_or_else(
-        || Ok(source_root.to_path_buf()),
-        |path| resolve_existing(project_root, path),
-    )?;
-    collector
-        .mappings
-        .insert((context, alias.to_string()), target.clone());
-    collector.package_roots.insert(target);
-    Ok(())
-}
-
-fn load_manifest(path: &Path) -> Result<SimplexConfig, ProjectError> {
-    let text = read_to_string(path)?;
-    let invalid = |source| ProjectError::Manifest {
-        path: path.to_path_buf(),
-        source: Box::new(source),
-    };
-
-    Ok(SimplexConfig {
-        build: BuildConfig::from_source(&text).map_err(invalid)?,
-        dependencies: DependencyConfig::from_source(&text).map_err(invalid)?,
-    })
-}
-
-fn read_to_string(path: &Path) -> Result<String, ProjectError> {
-    fs::read_to_string(path).map_err(|source| ProjectError::Read {
-        path: path.to_path_buf(),
-        source,
-    })
 }
 
 fn resolve_existing(base: &Path, path: &str) -> Result<PathBuf, ProjectError> {
@@ -366,45 +142,3 @@ fn containing_workspace(path: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
         .max_by_key(|root| root.as_os_str().len())
         .cloned()
 }
-
-/// The manifest for `document_path`: the configured one if set, otherwise the nearest one.
-/// `None` when Simplex support is off or no manifest exists.
-fn locate_manifest(
-    document_path: &Path,
-    settings: &SimplexSettings,
-    workspace_root: &Path,
-) -> Result<Option<PathBuf>, ProjectError> {
-    if !settings.enabled {
-        return Ok(None);
-    }
-
-    let configured = settings.manifest_path.trim();
-    if !configured.is_empty() {
-        let configured = workspace_root.join(configured);
-
-        return manifest_at(&configured)
-            .map(Some)
-            .ok_or(ProjectError::MissingConfiguredManifest(configured));
-    }
-
-    Ok(find_manifest(document_path))
-}
-
-fn manifest_at(path: &Path) -> Option<PathBuf> {
-    if path.is_file() {
-        return Some(path.to_path_buf());
-    }
-    manifest_in(path)
-}
-
-fn manifest_in(directory: &Path) -> Option<PathBuf> {
-    Some(directory.join(CONFIG_FILENAME)).filter(|path| path.is_file())
-}
-
-pub fn find_manifest(path: &Path) -> Option<PathBuf> {
-    let start = if path.is_dir() { path } else { path.parent()? };
-    start.ancestors().find_map(manifest_in)
-}
-
-#[cfg(test)]
-mod tests;

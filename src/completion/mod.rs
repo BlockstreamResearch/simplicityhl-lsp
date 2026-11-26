@@ -48,21 +48,13 @@ impl CompletionProvider {
             ("witness", "Module which contains witnesses"),
         ]
         .iter()
-        .map(|(module, detail)| module_to_completion((*module).to_string(), (*detail).to_string()))
+        .map(|(module, detail)| module_to_completion(module, detail))
         .collect();
 
         let type_casts_completion = type_cast::TYPE_CASTS
             .iter()
-            .map(|(&to, &from)| CompletionItem {
-                label: format!("{to} <- {from}"),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("Cast into type `{to}`")),
-                documentation: None,
-                insert_text: Some(format!("{from}>::into(${{1:{from}}})")),
-                insert_text_format: Some(InsertTextFormat::SNIPPET),
-                ..Default::default()
-            })
-            .collect::<Vec<_>>();
+            .map(|(to, from)| type_cast_completion(to, from))
+            .collect();
 
         Self {
             jets: jets_completion,
@@ -89,26 +81,14 @@ impl CompletionProvider {
         prefix: &str,
         functions: &[(&Function, &str)],
     ) -> Option<Vec<CompletionItem>> {
-        let completion_type = parse(prefix)?;
-
-        match completion_type {
+        match parse(prefix)? {
             CompletionType::Jet => Some(self.jets.clone()),
 
             CompletionType::Assignment(type_name) => {
-                let to = type_name.as_str();
-
-                if let Some(from) = type_cast::TYPE_CASTS.get(to) {
-                    return Some(vec![CompletionItem {
-                        label: format!("{to} <- {from}"),
-                        kind: Some(CompletionItemKind::FUNCTION),
-                        detail: Some(format!("Cast into type `{to}`")),
-                        documentation: None,
-                        insert_text: Some(format!("{from}>::into(${{1:{from}}})")),
-                        insert_text_format: Some(InsertTextFormat::SNIPPET),
-                        ..Default::default()
-                    }]);
-                }
-                Some(self.type_casts.clone())
+                Some(type_cast::TYPE_CASTS.get(type_name.as_str()).map_or_else(
+                    || self.type_casts.clone(),
+                    |from| vec![type_cast_completion(&type_name, from)],
+                ))
             }
 
             CompletionType::ClosingType => Some(vec![CompletionItem {
@@ -123,7 +103,7 @@ impl CompletionProvider {
 
             CompletionType::NonCompletionSymbol => None,
 
-            _ => {
+            CompletionType::Identifier(_) | CompletionType::OtherSymbol => {
                 let mut completions = CompletionProvider::get_function_completions(functions);
 
                 completions.extend_from_slice(&self.builtin);
@@ -171,14 +151,27 @@ fn template_to_completion(func: &types::FunctionTemplate) -> CompletionItem {
 }
 
 /// Convert module name to [`CompletionItem`].
-fn module_to_completion(module: String, detail: String) -> CompletionItem {
+fn module_to_completion(module: &str, detail: &str) -> CompletionItem {
     CompletionItem {
-        label: module.clone(),
+        label: module.to_string(),
         kind: Some(CompletionItemKind::MODULE),
-        detail: Some(detail),
+        detail: Some(detail.to_string()),
         documentation: None,
-        insert_text: Some(module),
+        insert_text: Some(module.to_string()),
         insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+        ..Default::default()
+    }
+}
+
+/// Completion for `<from>::into(…)`, casting into `to`.
+fn type_cast_completion(to: &str, from: &str) -> CompletionItem {
+    CompletionItem {
+        label: format!("{to} <- {from}"),
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: Some(format!("Cast into type `{to}`")),
+        documentation: None,
+        insert_text: Some(format!("{from}>::into(${{1:{from}}})")),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
         ..Default::default()
     }
 }

@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::Path;
 
 use ropey::Rope;
@@ -18,21 +19,24 @@ fn imports_enabled() -> Settings {
 
 fn write(path: impl AsRef<Path>, source: &str) {
     let path = path.as_ref();
-    std::fs::create_dir_all(path.parent().expect("path has parent")).unwrap();
-    std::fs::write(path, source).unwrap();
+    fs::create_dir_all(path.parent().expect("path has parent")).unwrap();
+    fs::write(path, source).unwrap();
 }
 
 fn temp_snapshot(source: &str) -> (TempDir, AnalysisSnapshot) {
     let temp = TempDir::new().unwrap();
     write(temp.path().join("Simplex.toml"), "");
+
     let path = temp.path().join("simf/main.simf");
     write(&path, source);
+
     let snapshot = AnalysisSnapshot::analyze(
         source,
         &path,
         &Settings::default(),
         &[temp.path().to_path_buf()],
     );
+
     (temp, snapshot)
 }
 
@@ -41,11 +45,14 @@ fn grouped_items_and_aliases_resolve_to_imported_definitions() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     write(root.join("Simplex.toml"), "");
+
     let dependency = root.join("simf/math.simf");
     write(&dependency, "pub fn add() {}\npub fn subtract() {}\n");
+
     let source = "use crate::math::{add as plus, subtract};\nfn main() { plus(); subtract() }\n";
     let path = root.join("simf/main.simf");
     write(&path, source);
+
     let snapshot =
         AnalysisSnapshot::analyze(source, &path, &imports_enabled(), &[root.to_path_buf()]);
     assert!(snapshot.compiler_diagnostics.is_empty());
@@ -59,12 +66,14 @@ fn grouped_items_and_aliases_resolve_to_imported_definitions() {
         let function = snapshot
             .find_imported_function(Span::new(0, offset..offset))
             .expect("imported function");
+
         assert_eq!(function.name().as_str(), expected_name);
         assert_eq!(
             snapshot.sources[function.span().file_id].uri,
-            Uri::from_file_path(std::fs::canonicalize(&dependency).unwrap()).unwrap()
+            Uri::from_file_path(fs::canonicalize(&dependency).unwrap()).unwrap()
         );
     }
+
     let module = source.find("math").unwrap() + 1;
     assert!(snapshot
         .find_imported_function(Span::new(0, module..module))
@@ -80,6 +89,7 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
         "[dependencies]\nmerkle = { path = 'deps/merkle' }\nfacade = { path = 'deps/facade' }\n",
     );
     write(root.join("deps/merkle/Simplex.toml"), "");
+
     let merkle = root.join("deps/merkle/simf/build_root.simf");
     write(
         &merkle,
@@ -94,11 +104,14 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
         "pub use leaf::ops::hash;\n",
     );
     write(root.join("deps/leaf/Simplex.toml"), "");
+
     let leaf = root.join("deps/leaf/simf/ops.simf");
     write(&leaf, "pub fn hash() {}\n");
+
     let source = "use merkle::build_root::{get_root, hash as and_hash};\nuse facade::smth::hash as or_hash;\nfn main() { get_root(); and_hash(); or_hash(); }\n";
     let path = root.join("simf/main.simf");
     write(&path, source);
+
     let snapshot =
         AnalysisSnapshot::analyze(source, &path, &imports_enabled(), &[root.to_path_buf()]);
     assert!(snapshot.compiler_diagnostics.is_empty());
@@ -114,18 +127,19 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
         (source.rfind("hash as").unwrap(), "hash", &leaf),
         (source.find("or_hash").unwrap(), "hash", &leaf),
     ];
+
     for (offset, expected_name, expected_path) in cases {
         let function = imported(offset);
         assert_eq!(function.name().as_str(), expected_name);
         assert_eq!(
             snapshot.sources[function.span().file_id].uri,
-            Uri::from_file_path(std::fs::canonicalize(expected_path).unwrap()).unwrap()
+            Uri::from_file_path(fs::canonicalize(expected_path).unwrap()).unwrap()
         );
     }
 
     let root_uri = Uri::from_file_path(&path).unwrap();
-    let merkle_uri = Uri::from_file_path(std::fs::canonicalize(&merkle).unwrap()).unwrap();
-    let leaf_uri = Uri::from_file_path(std::fs::canonicalize(&leaf).unwrap()).unwrap();
+    let merkle_uri = Uri::from_file_path(fs::canonicalize(&merkle).unwrap()).unwrap();
+    let leaf_uri = Uri::from_file_path(fs::canonicalize(&leaf).unwrap()).unwrap();
     let merkle_root = Location::new(
         merkle_uri.clone(),
         Range::new(Position::new(1, 1), Position::new(1, 21)),
@@ -148,6 +162,7 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
         (source.rfind("and_hash").unwrap(), &merkle_hash),
         (source.rfind("or_hash").unwrap(), &leaf_hash),
     ];
+
     for (offset, expected) in definition_cases {
         let position = offset_to_position(offset + 1, &snapshot.text).unwrap();
         let GotoDefinitionResponse::Scalar(location) = snapshot
@@ -157,6 +172,7 @@ fn non_crate_reexports_keep_original_uri_span_and_alias_identity() {
         else {
             panic!("expected one location");
         };
+
         assert_eq!(&location, expected);
     }
 }
@@ -166,6 +182,7 @@ fn function_selection_range_is_inside_its_full_range() {
     let source = "/* 😀 */ fn main() {}";
     let (_temp, snapshot) = temp_snapshot(source);
     let function = snapshot.functions.get_func("main").expect("main function");
+
     let (start, end) = span_to_positions(function.span(), &snapshot.text).unwrap();
     let selection = snapshot.find_function_name_range(function).unwrap();
     let name_start = source.find("main").unwrap();

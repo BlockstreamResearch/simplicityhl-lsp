@@ -98,6 +98,7 @@ impl SourceSet {
                 (*file_id, SourceDocument { uri, text })
             })
             .collect();
+
         Self { by_id }
     }
 }

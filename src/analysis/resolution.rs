@@ -3,10 +3,10 @@ use std::sync::Arc;
 
 use simplicityhl::error::Span;
 use simplicityhl::parse;
+use simplicityhl::str::{Identifier, SymbolName};
 use simplicityhl::TemplateAst;
 
-use super::AnalysisSnapshot;
-use crate::text::{get_comments_from_lines, offset_to_position};
+use super::{documentation, AnalysisSnapshot};
 
 impl AnalysisSnapshot {
     /// Add imported functions under the names visible from this root, including aliases.
@@ -14,73 +14,32 @@ impl AnalysisSnapshot {
         let Some(source_map) = template_ast.source_map() else {
             return;
         };
+
         self.populate_sources(source_map);
 
-        let resolved_program = template_ast.resolved_program();
-        self.populate_call_scopes(resolved_program);
-        for item in resolved_program.items() {
-            let parse::Item::Module(module) = item else {
-                continue;
-            };
-            let Some(0) = module
-                .name()
-                .as_str()
-                .strip_prefix("unit_")
-                .and_then(|id| id.parse::<usize>().ok())
-            else {
-                continue;
-            };
+        let program = template_ast.resolved_program();
+        self.populate_call_scopes(program);
 
-            for inner_item in module.items() {
-                let parse::Item::Use(use_decl) = inner_item else {
+        let roots =
+            modules(program.items()).filter(|module| unit_id(module.name().as_str()) == Some(0));
+
+        for root in roots {
+            for (local_name, function) in imports(program, root.items()) {
+                let Some(source) = self.sources.get(function.span().file_id) else {
                     continue;
                 };
-                let path = use_decl.path();
-                let Some(target_file_id) = path
-                    .get(1)
-                    .and_then(|segment| segment.as_str().strip_prefix("unit_"))
-                    .and_then(|id| id.parse::<usize>().ok())
-                else {
-                    continue;
-                };
-                let items = match use_decl.items() {
-                    parse::UseItems::Single(item) => std::slice::from_ref(item),
-                    parse::UseItems::List(items) => items.as_slice(),
-                };
 
-                for (original_name, alias) in items {
-                    let local_name = alias.as_ref().unwrap_or(original_name);
-                    let mut visited = HashSet::new();
-                    let Some(function) = resolve_function(
-                        resolved_program,
-                        target_file_id,
-                        &path[2..],
-                        original_name.as_str(),
-                        &mut visited,
-                    ) else {
-                        continue;
-                    };
-                    let Some(source) = self.sources.get(function.span().file_id) else {
-                        continue;
-                    };
-                    let start_line = offset_to_position(function.span().start, &source.text)
-                        .unwrap_or_default()
-                        .line;
-                    self.functions.insert(
-                        local_name.to_string(),
-                        function.clone(),
-                        get_comments_from_lines(start_line, &source.text),
-                    );
-                }
+                self.functions.insert(
+                    local_name.to_string(),
+                    function.clone(),
+                    documentation(function, &source.text),
+                );
             }
         }
     }
 
     fn populate_call_scopes(&mut self, program: &parse::Program) {
-        for item in program.items() {
-            let parse::Item::Module(unit) = item else {
-                continue;
-            };
+        for unit in modules(program.items()) {
             collect_call_scopes(program, unit.items(), &mut self.call_scopes);
         }
     }
@@ -102,49 +61,12 @@ fn collect_call_scopes(
     items: &[parse::Item],
     call_scopes: &mut HashMap<Span, Arc<HashMap<String, parse::Function>>>,
 ) {
-    let mut bindings = items
-        .iter()
-        .filter_map(|item| match item {
-            parse::Item::Function(function) => {
-                Some((function.name().to_string(), function.clone()))
-            }
-            _ => None,
-        })
+    let mut bindings = functions(items)
+        .map(|function| (function.name().to_string(), function.clone()))
         .collect::<HashMap<_, _>>();
-
-    for use_decl in items.iter().filter_map(|item| match item {
-        parse::Item::Use(use_decl) => Some(use_decl),
-        _ => None,
-    }) {
-        let path = use_decl.path();
-        let Some(target_file_id) = path
-            .get(1)
-            .and_then(|segment| segment.as_str().strip_prefix("unit_"))
-            .and_then(|id| id.parse::<usize>().ok())
-        else {
-            continue;
-        };
-        let imported_items = match use_decl.items() {
-            parse::UseItems::Single(item) => std::slice::from_ref(item),
-            parse::UseItems::List(items) => items.as_slice(),
-        };
-        for (original, alias) in imported_items {
-            let mut visited = HashSet::new();
-            let Some(function) = resolve_function(
-                program,
-                target_file_id,
-                &path[2..],
-                original.as_str(),
-                &mut visited,
-            ) else {
-                continue;
-            };
-            bindings.insert(
-                alias.as_ref().unwrap_or(original).to_string(),
-                function.clone(),
-            );
-        }
-    }
+    bindings.extend(
+        imports(program, items).map(|(name, function)| (name.to_string(), function.clone())),
+    );
 
     let bindings = Arc::new(bindings);
     for item in items {
@@ -181,12 +103,36 @@ pub(super) fn collect_use_declarations(
     }
 }
 
+/// Functions imported by the `use` declarations in `items`, under their local names.
+fn imports<'a>(
+    program: &'a parse::Program,
+    items: &'a [parse::Item],
+) -> impl Iterator<Item = (&'a SymbolName, &'a parse::Function)> + 'a {
+    uses(items).flat_map(move |use_decl| {
+        let path = use_decl.path();
+        let target = path.get(1).and_then(|segment| unit_id(segment.as_str()));
+
+        use_items(use_decl)
+            .iter()
+            .filter_map(move |(original, alias)| {
+                let function = resolve_function(
+                    program,
+                    target?,
+                    &path[2..],
+                    original.as_str(),
+                    &mut HashSet::new(),
+                )?;
+                Some((alias.as_ref().unwrap_or(original), function))
+            })
+    })
+}
+
 type ResolutionKey = (usize, Vec<String>, String);
 
 fn resolve_function<'a>(
     program: &'a parse::Program,
     file_id: usize,
-    module_path: &[simplicityhl::str::Identifier],
+    module_path: &[Identifier],
     name: &str,
     visited: &mut HashSet<ResolutionKey>,
 ) -> Option<&'a parse::Function> {
@@ -200,32 +146,18 @@ fn resolve_function<'a>(
     }
 
     let items = module_items(program, file_id, module_path)?;
-    if let Some(function) = items.iter().find_map(|item| match item {
-        parse::Item::Function(function) if function.name().as_str() == name => Some(function),
-        _ => None,
-    }) {
+    if let Some(function) = functions(items).find(|function| function.name().as_str() == name) {
         return Some(function);
     }
 
-    for use_decl in items.iter().filter_map(|item| match item {
-        parse::Item::Use(use_decl) => Some(use_decl),
-        _ => None,
-    }) {
-        let imported_items = match use_decl.items() {
-            parse::UseItems::Single(item) => std::slice::from_ref(item),
-            parse::UseItems::List(items) => items.as_slice(),
-        };
-        for (original, alias) in imported_items {
+    for use_decl in uses(items) {
+        for (original, alias) in use_items(use_decl) {
             if alias.as_ref().unwrap_or(original).as_str() != name {
                 continue;
             }
+
             let path = use_decl.path();
-            let target_file_id = path
-                .get(1)?
-                .as_str()
-                .strip_prefix("unit_")?
-                .parse::<usize>()
-                .ok()?;
+            let target_file_id = unit_id(path.get(1)?.as_str())?;
             if let Some(function) = resolve_function(
                 program,
                 target_file_id,
@@ -237,30 +169,57 @@ fn resolve_function<'a>(
             }
         }
     }
+
     None
 }
 
 fn module_items<'a>(
     program: &'a parse::Program,
     file_id: usize,
-    module_path: &[simplicityhl::str::Identifier],
+    module_path: &[Identifier],
 ) -> Option<&'a [parse::Item]> {
     let unit_name = format!("unit_{file_id}");
-    let unit = program.items().iter().find_map(|item| match item {
-        parse::Item::Module(module) if module.name().as_str() == unit_name => Some(module),
-        _ => None,
-    })?;
+    let unit = modules(program.items()).find(|module| module.name().as_str() == unit_name)?;
 
     let mut items = unit.items();
     for segment in module_path {
-        let module = items.iter().find_map(|item| match item {
-            parse::Item::Module(module) if module.name().as_str() == segment.as_str() => {
-                Some(module)
-            }
-            _ => None,
-        })?;
-        items = module.items();
+        items = modules(items)
+            .find(|module| module.name().as_str() == segment.as_str())?
+            .items();
     }
 
     Some(items)
+}
+
+/// The file id of a module the compiler driver named `unit_<id>` when flattening the program.
+fn unit_id(name: &str) -> Option<usize> {
+    name.strip_prefix("unit_")?.parse().ok()
+}
+
+pub(crate) fn use_items(use_decl: &parse::UseDecl) -> &[parse::AliasedSymbolName] {
+    match use_decl.items() {
+        parse::UseItems::Single(item) => std::slice::from_ref(item),
+        parse::UseItems::List(items) => items,
+    }
+}
+
+fn uses(items: &[parse::Item]) -> impl Iterator<Item = &parse::UseDecl> {
+    items.iter().filter_map(|item| match item {
+        parse::Item::Use(use_decl) => Some(use_decl),
+        _ => None,
+    })
+}
+
+fn functions(items: &[parse::Item]) -> impl Iterator<Item = &parse::Function> {
+    items.iter().filter_map(|item| match item {
+        parse::Item::Function(function) => Some(function),
+        _ => None,
+    })
+}
+
+fn modules(items: &[parse::Item]) -> impl Iterator<Item = &parse::Module> {
+    items.iter().filter_map(|item| match item {
+        parse::Item::Module(module) => Some(module),
+        _ => None,
+    })
 }
