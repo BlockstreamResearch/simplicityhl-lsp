@@ -7,6 +7,9 @@ on:
 
 name: Continuous integration
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
@@ -20,10 +23,16 @@ jobs:
       matrix:
         toolchain: [stable, msrv]
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      # Actions are pinned to a commit, since a tag can be moved to other code.
+      # The comment is the release tag that pointed to that commit.
+      - &checkout
+        name: "Checkout repo"
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - &setup-rbmt
+        name: "Setup cargo-rbmt"
+        uses: $/.github/actions/setup-rbmt
       - name: "Run tests"
         run: cargo rbmt --lock-file existing test --toolchain ${{ matrix.toolchain }}
 
@@ -31,8 +40,7 @@ jobs:
     name: Test - Windows stable toolchain
     runs-on: windows-latest
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
+      - *checkout
       - name: "Install pinned stable toolchain"
         shell: bash
         run: |
@@ -50,10 +58,8 @@ jobs:
       matrix:
         task: [lint, docs, docsrs]
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      - *checkout
+      - *setup-rbmt
       - name: "Run ${{ matrix.task }}"
         run: cargo rbmt --lock-file existing ${{ matrix.task }}
 
@@ -61,10 +67,8 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - name: "Checkout repo"
-        uses: actions/checkout@v4
-      - name: "Setup cargo-rbmt"
-        uses: ./.github/actions/setup-rbmt
+      - *checkout
+      - *setup-rbmt
       - name: "Check formatting"
         run: cargo rbmt fmt --check
 
