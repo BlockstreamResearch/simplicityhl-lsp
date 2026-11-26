@@ -1,4 +1,4 @@
-name: Sync compiler
+name: Sync dependencies
 
 on:
   schedule:
@@ -18,20 +18,29 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-        with:
-          toolchain: stable
+      - name: Compare locked and latest versions
+        run: |
+          set -euo pipefail
+          echo '[]' > outdated.json
+          echo '[]' > found.json
 
-      - name: Install cargo-outdated
-        run: cargo install cargo-outdated
+          for crate in simplicityhl smplx-build; do
+            current=$(cargo pkgid --locked "$crate")
+            current=${current##*@}
+            latest=$(curl -sSf -A "simplicityhl-lsp CI (https://github.com/BlockstreamResearch/simplicityhl-lsp)" \
+              "https://crates.io/api/v1/crates/$crate" | jq -r .crate.max_stable_version)
+            echo "$crate: locked $current, latest $latest"
 
-      - name: Run cargo outdated
-        run: cargo outdated -p simplicityhl --exit-code 1 --format json > outdated.json
+            if [ "$current" != "$latest" ]; then
+              jq --arg n "$crate" --arg c "$current" --arg l "$latest" \
+                '. + [{name: $n, current: $c, latest: $l}]' found.json > tmp.json
+              mv tmp.json found.json
+            fi
+          done
+          mv found.json outdated.json
 
-      - name: Print outdated.json
-        if: always()
-        run: cat outdated.json | jq
+          jq . outdated.json
+          [ "$(jq length outdated.json)" -eq 0 ]
 
       - name: Upload Artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
