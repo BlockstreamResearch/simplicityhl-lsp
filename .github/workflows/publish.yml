@@ -4,9 +4,6 @@ on:
   push:
     tags:
       - 'simplicityhl-lsp-v*'
-  workflow_dispatch: {}
-  release:
-    types: [published]
 
 permissions:
   contents: read
@@ -16,9 +13,39 @@ jobs:
     name: CI
     uses: $/.github/workflows/rust.yml
 
+  verify-tag:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check signature and branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME")
+          if [ "$(jq -r .object.type <<< "$ref")" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is not an annotated tag"
+            exit 1
+          fi
+          verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$(jq -r .object.sha <<< "$ref")" --jq .verification.verified)
+          if [ "$verified" != true ]; then
+            echo "::error::$GITHUB_REF_NAME has no verified signature"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::$GITHUB_SHA is not on master"
+            exit 1
+          fi
+
   publish:
     name: Publish simplicityhl-lsp to crates.io
-    needs: checks
+    needs: [checks, verify-tag]
     runs-on: ubuntu-latest
     environment: release
     concurrency:
@@ -47,8 +74,10 @@ jobs:
           TAG="${GITHUB_REF##*/}"
           VERSION_TAG="${TAG#simplicityhl-lsp-v}"
           CRATE_VERSION=$(cargo metadata --manifest-path ./Cargo.toml --no-deps --format-version=1 | jq -r '.packages[] | select(.name=="simplicityhl-lsp").version')
+
           echo "Tag version: $VERSION_TAG"
           echo "Crate version: $CRATE_VERSION"
+
           if [ "$VERSION_TAG" != "$CRATE_VERSION" ]; then
             echo "Tag version ($VERSION_TAG) does not match crate version ($CRATE_VERSION)"
             exit 1
