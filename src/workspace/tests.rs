@@ -429,7 +429,10 @@ fn shared_dependencies_deduplicate_and_open_buffers_take_precedence() {
         Some(7),
     );
     let direct = update_for(&updates, &dependency_uri);
-    assert!(direct.diagnostics.is_empty());
+    assert_eq!(
+        direct.diagnostics,
+        [] as [tower_lsp_server::lsp_types::Diagnostic; 0]
+    );
     assert_eq!(direct.version, Some(7));
 
     let updates = state.remove(&dependency_uri);
@@ -501,7 +504,10 @@ fn pending_open_buffer_analysis_suppresses_cross_root_republication() {
         .expect("current dependency analysis");
     let dependency = update_for(&current, &dependency_uri);
     assert_eq!(dependency.version, Some(2));
-    assert!(dependency.diagnostics.is_empty());
+    assert_eq!(
+        dependency.diagnostics,
+        [] as [tower_lsp_server::lsp_types::Diagnostic; 0]
+    );
 }
 
 #[test]
@@ -546,7 +552,10 @@ fn replacing_roots_clears_removed_dependency_diagnostics() {
             current.generation,
         )
         .expect("newer analysis");
-    assert!(update_for(&updates, &dependency_uri).diagnostics.is_empty());
+    assert_eq!(
+        update_for(&updates, &dependency_uri).diagnostics,
+        [] as [tower_lsp_server::lsp_types::Diagnostic; 0]
+    );
 
     let stale_result = state.replace_if_current(
         &root_uri,

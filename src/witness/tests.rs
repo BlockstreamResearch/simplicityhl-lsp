@@ -21,7 +21,10 @@ fn validates_witness_shape_and_required_fields() {
     for (text, expected) in cases {
         assert_eq!(validate(text)[0].message, expected);
     }
-    assert!(validate(r#"{"amount":{"value":1,"type":"u32"}}"#).is_empty());
+    assert_eq!(
+        validate(r#"{"amount":{"value":1,"type":"u32"}}"#),
+        [] as [tower_lsp_server::lsp_types::Diagnostic; 0]
+    );
 }
 
 #[test]
