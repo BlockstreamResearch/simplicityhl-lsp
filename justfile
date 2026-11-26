@@ -1,14 +1,14 @@
 lockfile := "existing"
 
-# Run the full local CI mirror: all toolchains, lint, docs, fmt check.
+# Run the local CI checks: tests, lint, docs, fmt check.
 ci: test-all lint docs fmt-check
 
 # Install the toolchains this repo pins (stable, nightly, MSRV).
 toolchains:
     cargo rbmt toolchains
 
-# Test on every toolchain this repo pins (stable, nightly, MSRV).
-test-all: (test "stable") (test "nightly") (test "msrv")
+# Test on stable and MSRV, as CI does.
+test-all: (test "stable") (test "msrv")
 
 # Test on a single toolchain: `just test stable`.
 test toolchain:

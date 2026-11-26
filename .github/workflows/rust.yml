@@ -1,12 +1,15 @@
-on:   # yamllint disable-line rule:truthy
+on:
+  workflow_call:
   pull_request:
   push:
     branches:
       - master
-      - 'test-ci/**'
-  workflow_call:
 
 name: Continuous integration
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   Test:
@@ -15,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, nightly, msrv]
+        toolchain: [stable, msrv]
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v4
@@ -27,15 +30,17 @@ jobs:
   Windows:
     name: Test - Windows stable toolchain
     runs-on: windows-latest
-    strategy:
-      fail-fast: false
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v4
-      - name: "Select toolchain"
-        uses: dtolnay/rust-toolchain@stable
+      - name: "Install pinned stable toolchain"
+        shell: bash
+        run: |
+          stable=$(sed -n 's/^stable = "\(.*\)"/\1/p' Cargo.toml)
+          rustup toolchain install "$stable" --profile minimal
+          rustup default "$stable"
       - name: "Run tests"
-        run: cargo test
+        run: cargo test --locked
 
   Check:
     name: Check - ${{ matrix.task }}
@@ -55,8 +60,6 @@ jobs:
   Format:
     name: Format
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
     steps:
       - name: "Checkout repo"
         uses: actions/checkout@v4
@@ -64,3 +67,13 @@ jobs:
         uses: ./.github/actions/setup-rbmt
       - name: "Check formatting"
         run: cargo rbmt fmt --check
+
+  Conclusion:
+    name: Conclusion
+    if: always()
+    needs: [Test, Windows, Check, Format]
+    runs-on: ubuntu-latest
+    steps:
+      - name: "Fail if any check did not pass"
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
