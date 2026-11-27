@@ -1,0 +1,25 @@
+name: Improvement (maintainers)
+description: Planned work written up by a maintainer
+type: Task
+
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: The problem, its cause and the fix, in one paragraph
+    validations:
+      required: true
+
+  - type: input
+    id: upstream
+    attributes:
+      label: Blocked on
+      description: The SimplicityHL or smplx issue or release this waits for. If set, add `S-blocked-upstream`.
+      placeholder: "BlockstreamResearch/SimplicityHL#205"
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: Code locations, examples, the fix, alternatives you rejected

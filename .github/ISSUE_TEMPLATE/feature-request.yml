@@ -1,13 +1,30 @@
 name: Feature request
-description: Suggest a new feature
-labels: ['feature']
+description: Suggest a new language server feature
+type: Feature
 assignees:
-  - gerau
+  - LesterEvSe
+
 body:
   - type: textarea
-    id: feature-description
+    id: feature
     attributes:
-      label: "Describe the feature"
-      description: "A description of what you would like to see in the project"
+      label: What should the language server do?
+      description: The feature as you'd see it in your editor
+      placeholder: "Show the type of a variable when hovering over it"
     validations:
       required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Why?
+      description: The problem it solves, or what you can't do today
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example
+      description: A `.simf` snippet where the feature would help, if there is one
+      render: rust

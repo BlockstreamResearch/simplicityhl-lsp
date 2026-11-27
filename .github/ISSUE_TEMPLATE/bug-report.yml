@@ -1,38 +1,54 @@
-name: Bug Report
-description: File a bug report
-labels: ['bug']
+name: Bug report
+description: Something in the language server doesn't work
+type: Bug
 assignees:
-  - gerau
+  - LesterEvSe
+
 body:
-  - type: markdown
-    attributes:
-      value: Thanks for taking the time to fill out this bug report!
   - type: input
     id: version
     attributes:
-      label: "Language server version"
-      placeholder: "1.2.3"
+      label: Language server version
+      description: Run `cargo install --list` and copy the `simplicityhl-lsp` line. If you built it yourself, give the commit.
+      placeholder: "simplicityhl-lsp v0.9.1"
     validations:
       required: true
+
   - type: input
-    id: text-editor
+    id: client
     attributes:
-      label: "Text editor"
-      description: "Which text editor was used with the language server"
-      placeholder: "vscode | other"
+      label: Extension or editor
+      description: The SimplicityHL Language Support extension version, or your editor if you don't use VS Code
+      placeholder: "SimplicityHL Language Support 0.4.1"
     validations:
       required: true
+
   - type: textarea
     id: what-happened
     attributes:
       label: What happened?
-      description: A brief description of what happened and what you expected to happen
+      description: What you saw, and what you expected instead
     validations:
       required: true
+
   - type: textarea
-    id: reproduction-steps
+    id: snippet
     attributes:
-      label: "Minimal reproduction steps"
-      description: "The minimal steps needed to reproduce the bug"
+      label: Files
+      description: The smallest `.simf`, `.wit` or `Simplex.toml` that shows the problem, in a code block. For several files, attach them.
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Where you put the cursor and what you did
+      placeholder: "1. Put the cursor on `foo` in line 3\n2. Run Go to Definition"
     validations:
       required: true
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Settings
+      description: Your `simplicityhl` settings, if you changed any
+      render: json
